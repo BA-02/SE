@@ -1,0 +1,1723 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>سجلّ المستودع</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<!--
+  ============================================================
+  سجلّ المستودع — نسخة مستقلة (تعمل خارج Claude بالكامل)
+  ------------------------------------------------------------
+  - لا تعتمد على أي خدمة من Anthropic/Claude.
+  - يمكن فتح هذا الملف مباشرة بالمتصفح (فقط بالنقر عليه مرتين)
+    أو رفعه لأي استضافة عادية (GitHub Pages, Netlify, Vercel,
+    استضافة مشتركة عادية...الخ) كملف index.html واحد.
+  - البيانات تُحفظ الآن على Supabase وتتزامن
+    تلقائياً وفوراً بين كل الأجهزة التي تفتح نفس هذا الملف —
+    أي تعديل على جهاز يظهر مباشرة على بقية الأجهزة بدون تحديث الصفحة.
+  - المكتبات (React / lucide-react) تُحمَّل من شبكة توصيل
+    محتوى عامة (esm.sh) وليس من Claude، لذا يلزم اتصال إنترنت
+    عادي لتحميلها أول مرة فقط (يخزنها المتصفح مؤقتاً بعدها).
+  ============================================================
+-->
+
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- طبقة تخزين سحابية: Supabase (PostgreSQL + Realtime) -->
+<script type="module">
+  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+  // بيانات مشروع Supabase
+  const SUPABASE_URL = "https://beezqxxltabbmfqdyxne.supabase.co";
+  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_cCO8hXnwLocQfw5SGTjDtw_3ZQAZDvO";
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+  const TABLE = "warehouse_state";
+
+  window.storage = {
+    async get(key) {
+      const { data, error } = await supabase
+        .from(TABLE)
+        .select("key,value")
+        .eq("key", key)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return null;
+      return { key: data.key, value: data.value };
+    },
+    async set(key, value) {
+      const { error } = await supabase
+        .from(TABLE)
+        .upsert({ key, value: String(value), updated_at: new Date().toISOString() }, { onConflict: "key" });
+      if (error) throw error;
+      return { key, value };
+    },
+    async delete(key) {
+      const { data, error } = await supabase
+        .from(TABLE)
+        .delete()
+        .eq("key", key)
+        .select("key")
+        .maybeSingle();
+      if (error) throw error;
+      return { key, deleted: !!data };
+    },
+    async list(prefix) {
+      let q = supabase.from(TABLE).select("key");
+      if (prefix) q = q.like("key", `${prefix}%`);
+      const { data, error } = await q;
+      if (error) throw error;
+      return { keys: (data || []).map(r => r.key), prefix };
+    }
+  };
+
+  // مزامنة فورية بين جميع الأجهزة عبر Supabase Realtime
+  window.subscribeStorage = function (key, callback) {
+    const channel = supabase
+      .channel(`warehouse-state-${key}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: TABLE, filter: `key=eq.${key}` },
+        (payload) => {
+          if (payload.eventType === "DELETE") return;
+          const row = payload.new;
+          if (row && row.key === key) callback(row.value, false);
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  };
+
+  window.supabase = supabase;
+</script>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  Package, ArrowDownToLine, ArrowUpFromLine, Boxes, Barcode, LayoutGrid,
+  Search, Plus, Trash2, Pencil, X, Check, AlertTriangle, TriangleAlert,
+  ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert
+} from "lucide-react";
+
+/* ------------------------------------------------------------------ */
+/*  SEED DATA — pulled from the original المستودع workbook             */
+/* ------------------------------------------------------------------ */
+
+const seedItems = [
+  { code: "6287010241294", name: "صحون بلاستك كبار", category: "الدولاب البني 1", notes: "" },
+  { code: "6287010241287", name: "صحون بلاستك صغار", category: "كرتون صحون البلاستك الكبار", notes: "" },
+  { code: "5612246179", name: "نشاف", category: "الدولاب البني 6", notes: "" },
+  { code: "4791002001138", name: "شاي", category: "الدولاب البني 5", notes: "" },
+  { code: "6281100353522", name: "بسكوت شاي حجم صغير", category: "الدولاب البني 9", notes: "" },
+  { code: "6281100353409", name: "بسكوت شاي حجم كبير", category: "الدولاب البني 9", notes: "" },
+  { code: "6281187045204", name: "كرتون خبز مسح", category: "الدولاب البني 8", notes: "" },
+  { code: "6287005793562", name: "شدة اكواب قهوة", category: "الدولاب البني 3", notes: "" },
+  { code: "6287005511647", name: "شدة طاسات سلطة بلاستك", category: "الدولاب البني 3", notes: "" },
+  { code: "6281076100519", name: "شدة طاسات سلطة بلاستك بدون غطا", category: "الدولاب البني 3", notes: "" },
+  { code: "6287008312012", name: "شدة بوادي قصدير صغار", category: "الدولاب البني 2", notes: "" },
+  { code: "6291101711375", name: "شدة ملاعق بلاستك", category: "الدولاب البني 3", notes: "" },
+  { code: "6281102102333", name: "تانج اناناس", category: "الدولاب البني 4", notes: "" },
+  { code: "6281102102395", name: "تانج ليمون", category: "الدولاب البني 4", notes: "" },
+  { code: "6281102102371", name: "تانج مانجو", category: "الدولاب البني 4", notes: "" },
+  { code: "6649895611", name: "شدة صحون قصدير مقسمين", category: "الدولاب البني 2", notes: "" },
+];
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+const seedIncoming = [
+  ["6287010241294", 15], ["6287010241287", 4], ["5612246179", 3], ["4791002001138", 1],
+  ["6281100353522", 2], ["6281100353409", 6], ["6281187045204", 1], ["6287005793562", 3.5],
+  ["6287005511647", 2], ["6281076100519", 1], ["6287008312012", 7], ["6291101711375", 3],
+  ["6281102102333", 1.5], ["6281102102395", 2], ["6281102102371", 1], ["6649895611", 0.5],
+].map(([code, qty], i) => {
+  const item = seedItems.find((it) => it.code === code);
+  return { id: "in-" + i, code, name: item.name, date: todayISO(), qty, notes: "" };
+});
+
+const seedOutgoing = [
+  { id: "out-0", code: "5612246179", name: "نشاف", date: todayISO(), qty: 1, notes: "" },
+];
+
+const seedBarcodes = [
+  { name: "القدر الكبير", number: "8260767800" },
+  { name: "النشاف", number: "5612246179" },
+  { name: "كاسات بلاستيك", number: "8817291700" },
+  { name: "ملاعق بلاستيك", number: "1562072154" },
+  { name: "صحون قصدير مقسمين", number: "6649895611" },
+  { name: "صواني الحديد", number: "9987527455" },
+];
+
+const LOW_STOCK_THRESHOLD = 10;
+
+/* ------------------------------------------------------------------ */
+/*  PERSISTENCE                                                       */
+/* ------------------------------------------------------------------ */
+
+const STORE_KEY = "warehouse-data-v1";
+// Data now lives in Supabase and syncs in real time across devices
+// (laptop, phone, tablet) via window.subscribeStorage — see the Supabase layer above.
+
+function useStore() {
+  const [data, setData] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [online, setOnline] = useState(true);
+  const [lastSynced, setLastSynced] = useState(null);
+  const dataRef = React.useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unsub = null;
+    (async () => {
+      try {
+        const res = await window.storage?.get(STORE_KEY, false);
+        if (!cancelled) {
+          if (res?.value) {
+            dataRef.current = JSON.parse(res.value);
+            setData(dataRef.current);
+          } else {
+            const seed = { items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes };
+            dataRef.current = seed;
+            setData(seed);
+            await window.storage?.set(STORE_KEY, JSON.stringify(seed), false);
+          }
+          setOnline(true);
+          setLastSynced(Date.now());
+        }
+      } catch {
+        if (!cancelled) {
+          const seed = { items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes };
+          dataRef.current = seed;
+          setData(seed);
+          setOnline(false);
+        }
+      }
+      // مزامنة فورية: أي تعديل يحصل من جهاز آخر يصل هنا تلقائياً بدون تحديث الصفحة
+      if (!cancelled && window.subscribeStorage) {
+        unsub = window.subscribeStorage(STORE_KEY, (rawValue, isLocalWrite) => {
+          if (cancelled || isLocalWrite) return; // تجاهل صدى تعديلاتنا نحن
+          try {
+            const next = JSON.parse(rawValue);
+            dataRef.current = next;
+            setData(next);
+            setOnline(true);
+            setLastSynced(Date.now());
+          } catch {}
+        });
+      }
+    })();
+    return () => { cancelled = true; if (unsub) unsub(); };
+  }, []);
+
+  const persist = useCallback(async (next) => {
+    dataRef.current = next;
+    setData(next);
+    setSaving(true);
+    try {
+      await window.storage?.set(STORE_KEY, JSON.stringify(next), false);
+      setOnline(true);
+      setLastSynced(Date.now());
+    } catch {
+      setOnline(false);
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  return [data, persist, saving, { online, lastSynced }];
+}
+
+/* ------------------------------------------------------------------ */
+/*  HELPERS                                                            */
+/* ------------------------------------------------------------------ */
+
+function computeInventory(data) {
+  const { items, incoming, outgoing } = data;
+  return items.map((item) => {
+    const inQty = incoming.filter((r) => r.code === item.code).reduce((s, r) => s + Number(r.qty || 0), 0);
+    const outQty = outgoing.filter((r) => r.code === item.code).reduce((s, r) => s + Number(r.qty || 0), 0);
+    const balance = Math.round((inQty - outQty) * 100) / 100;
+    let status = "available";
+    if (balance <= 0) status = "empty";
+    else if (balance <= LOW_STOCK_THRESHOLD) status = "low";
+    return { ...item, inQty, outQty, balance, status };
+  });
+}
+
+function fmtDate(d) {
+  if (!d) return "—";
+  try {
+    return new Intl.DateTimeFormat("ar-SA-u-nu-latn", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(d));
+  } catch {
+    return d;
+  }
+}
+
+function toCSV(rows, headers) {
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [headers.map(esc).join(",")];
+  rows.forEach((r) => lines.push(headers.map((h) => esc(r[h])).join(",")));
+  return lines.join("\n");
+}
+
+function downloadCSV(filename, rows, headers) {
+  const csv = "\uFEFF" + toCSV(rows, headers);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ------------------------------------------------------------------ */
+/*  SMALL UI PRIMITIVES                                                */
+/* ------------------------------------------------------------------ */
+
+const STATUS_META = {
+  available: { label: "متوفر", ink: "#3F6D4E", bg: "#E9F1E9" },
+  low: { label: "مخزون منخفض", ink: "#B3792C", bg: "#FBF0DD" },
+  empty: { label: "نفدت الكمية", ink: "#B23A2E", bg: "#FAE6E2" },
+};
+
+function StampBadge({ status }) {
+  const meta = STATUS_META[status];
+  return (
+    <span
+      className="stamp-badge"
+      style={{ color: meta.ink, borderColor: meta.ink, background: meta.bg }}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+function CodeTag({ code }) {
+  return (
+    <span className="code-tag">
+      <ScanLine size={12} strokeWidth={2.2} style={{ opacity: 0.55 }} />
+      {code}
+    </span>
+  );
+}
+
+function EmptyState({ icon: Icon, title, hint }) {
+  return (
+    <div className="empty-state">
+      <Icon size={30} strokeWidth={1.4} />
+      <div className="empty-title">{title}</div>
+      {hint && <div className="empty-hint">{hint}</div>}
+    </div>
+  );
+}
+
+function Toast({ toast }) {
+  if (!toast) return null;
+  return (
+    <div className={`toast toast-${toast.type}`}>
+      {toast.type === "error" ? <AlertTriangle size={16} /> : <Check size={16} />}
+      <span>{toast.msg}</span>
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className={`modal-sheet${wide ? " modal-sheet-wide" : ""}`} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span className="modal-title">{title}</span>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------- CAMERA BARCODE SCANNER -------------------- */
+/* Uses the phone/laptop camera with the browser's native BarcodeDetector
+   API — no external library needed. Falls back to manual entry when the
+   browser doesn't support live detection (e.g. Safari on iPhone today). */
+
+function BarcodeCameraModal({ onDetect, onClose }) {
+  const videoRef = React.useRef(null);
+  const streamRef = React.useRef(null);
+  const rafRef = React.useRef(null);
+  const [status, setStatus] = useState("initializing"); // initializing | scanning | unsupported | denied | error
+  const [manualCode, setManualCode] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    function cleanup() {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+
+    async function start() {
+      if (typeof window === "undefined" || !("BarcodeDetector" in window)) {
+        setStatus("unsupported");
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        setStatus("scanning");
+
+        let detector;
+        try {
+          detector = new window.BarcodeDetector({
+            formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "codabar", "itf", "qr_code"],
+          });
+        } catch {
+          detector = new window.BarcodeDetector();
+        }
+
+        const tick = async () => {
+          if (cancelled || !videoRef.current) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes && codes.length > 0) {
+              const value = (codes[0].rawValue || "").trim();
+              if (value) {
+                cancelled = true;
+                cleanup();
+                onDetect(value);
+                return;
+              }
+            }
+          } catch {
+            /* ignore per-frame decode errors */
+          }
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
+      } catch (err) {
+        setStatus(err && err.name === "NotAllowedError" ? "denied" : "error");
+      }
+    }
+
+    start();
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submitManual = () => {
+    const v = manualCode.trim();
+    if (v) onDetect(v);
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-sheet camera-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span className="modal-title"><Camera size={16} style={{ verticalAlign: "-2px", marginLeft: 6 }} /> مسح بالكاميرا</span>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-body camera-body">
+          {status === "scanning" || status === "initializing" ? (
+            <div className="camera-frame">
+              <video ref={videoRef} className="camera-video" muted playsInline />
+              <div className="camera-reticle">
+                <span className="reticle-corner tl" /><span className="reticle-corner tr" />
+                <span className="reticle-corner bl" /><span className="reticle-corner br" />
+                <div className="reticle-line" />
+              </div>
+              <div className="camera-status">
+                {status === "initializing" ? "جارٍ تشغيل الكاميرا…" : "وجّه الكاميرا نحو الباركود"}
+              </div>
+            </div>
+          ) : (
+            <div className="camera-fallback">
+              <ShieldAlert size={26} strokeWidth={1.5} />
+              {status === "unsupported" && (
+                <p>
+                  متصفحك الحالي لا يدعم القراءة المباشرة للباركود بالكاميرا (مدعوم حالياً في Chrome على أندرويد بشكل أساسي).
+                  اكتب الكود يدوياً بالأسفل، أو استخدم قارئ الباركود اليدوي.
+                </p>
+              )}
+              {status === "denied" && <p>تم رفض إذن الكاميرا. فعّل إذن الكاميرا لهذا الموقع من إعدادات المتصفح ثم أعد المحاولة، أو اكتب الكود يدوياً.</p>}
+              {status === "error" && <p>تعذّر تشغيل الكاميرا. تأكد من عدم استخدامها في تطبيق آخر، أو اكتب الكود يدوياً.</p>}
+              <div className="camera-manual">
+                <input
+                  className="input mono"
+                  autoFocus
+                  placeholder="اكتب الكود هنا"
+                  value={manualCode}
+                  onChange={(e) => setManualCode(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitManual(); } }}
+                />
+                <button className="btn-primary" onClick={submitManual}><Check size={15} /> استخدام هذا الكود</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScanCameraButton({ onClick }) {
+  return (
+    <button type="button" className="scan-camera-btn" onClick={onClick} title="مسح بالكاميرا">
+      <Camera size={15} /> مسح بالكاميرا
+    </button>
+  );
+}
+
+
+function Field({ label, children }) {
+  return (
+    <label className="field">
+      <span className="field-label">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  DASHBOARD                                                          */
+/* ------------------------------------------------------------------ */
+
+function Dashboard({ inventory, data, go }) {
+  const total = inventory.length;
+  const low = inventory.filter((i) => i.status === "low").length;
+  const empty = inventory.filter((i) => i.status === "empty").length;
+  const available = total - low - empty;
+
+  const recent = useMemo(() => {
+    const inRows = data.incoming.map((r) => ({ ...r, kind: "in" }));
+    const outRows = data.outgoing.map((r) => ({ ...r, kind: "out" }));
+    return [...inRows, ...outRows]
+      .sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.id.localeCompare(a.id))
+      .slice(0, 8);
+  }, [data]);
+
+  const stats = [
+    { label: "إجمالي الأصناف", value: total, icon: Boxes, tone: "navy", action: () => go("items") },
+    { label: "متوفرة", value: available, icon: Check, tone: "green", action: () => go("inventory") },
+    { label: "مخزون منخفض", value: low, icon: TriangleAlert, tone: "amber", action: () => go("inventory") },
+    { label: "نفدت كمياتها", value: empty, icon: AlertTriangle, tone: "red", action: () => go("inventory") },
+  ];
+
+  return (
+    <div className="page">
+      <PageHeader eyebrow="نظرة عامة" title="لوحة التحكم" subtitle="ملخص سريع لحالة المستودع اليوم" />
+
+      <div className="stat-grid">
+        {stats.map((s) => (
+          <button key={s.label} className={`stat-card tone-${s.tone}`} onClick={s.action}>
+            <s.icon size={20} strokeWidth={2} />
+            <div className="stat-value">{s.value}</div>
+            <div className="stat-label">{s.label}</div>
+          </button>
+        ))}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <span className="panel-title">آخر الحركات</span>
+          <span className="panel-sub">أحدث 8 عمليات دخول وخروج</span>
+        </div>
+        {recent.length === 0 ? (
+          <EmptyState icon={Clock} title="لا توجد حركات بعد" hint="سجّل أول عملية دخول أو خروج ليظهر السجل هنا" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead>
+                <tr>
+                  <th>النوع</th>
+                  <th>الصنف</th>
+                  <th>الكود</th>
+                  <th>الكمية</th>
+                  <th>التاريخ</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map((r) => (
+                  <tr key={r.kind + r.id}>
+                    <td>
+                      <span className={`move-pill move-${r.kind}`}>
+                        {r.kind === "in" ? <ArrowDownToLine size={13} /> : <ArrowUpFromLine size={13} />}
+                        {r.kind === "in" ? "داخل" : "خارج"}
+                      </span>
+                    </td>
+                    <td className="cell-strong">{r.name}</td>
+                    <td><CodeTag code={r.code} /></td>
+                    <td className="cell-mono">{r.qty}</td>
+                    <td className="cell-mono">{fmtDate(r.date)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PageHeader({ eyebrow, title, subtitle, action }) {
+  return (
+    <div className="page-head">
+      <div>
+        {eyebrow && <div className="page-eyebrow">{eyebrow}</div>}
+        <h1 className="page-title">{title}</h1>
+        {subtitle && <p className="page-subtitle">{subtitle}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  ITEMS PAGE                                                         */
+/* ------------------------------------------------------------------ */
+
+function ItemsPage({ data, setData, notify }) {
+  const [query, setQuery] = useState("");
+  const [modal, setModal] = useState(null); // { mode: 'add'|'edit', item }
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+
+  const filtered = data.items.filter((it) =>
+    (it.name + it.code + it.category).toLowerCase().includes(query.toLowerCase())
+  );
+
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "" } });
+  const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
+
+  const save = (item) => {
+    if (!item.code.trim() || !item.name.trim()) {
+      notify("الكود واسم المنتج مطلوبان", "error");
+      return;
+    }
+    const exists = data.items.some((i) => i.code === item.code && i.code !== modal.item.__originalCode);
+    if (modal.mode === "add" && data.items.some((i) => i.code === item.code)) {
+      notify("هذا الكود مسجّل مسبقاً لصنف آخر", "error");
+      return;
+    }
+    let items;
+    if (modal.mode === "add") {
+      items = [...data.items, item];
+    } else {
+      items = data.items.map((i) => (i.code === modal.item.code ? item : i));
+    }
+    setData({ ...data, items });
+    setModal(null);
+    notify(modal.mode === "add" ? "تمت إضافة الصنف" : "تم حفظ التعديلات");
+  };
+
+  const remove = (code) => {
+    setData({
+      ...data,
+      items: data.items.filter((i) => i.code !== code),
+    });
+    setConfirmDelete(null);
+    notify("تم حذف الصنف");
+  };
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="الجرد"
+        title="قائمة الأغراض"
+        subtitle={`${data.items.length} صنفاً مسجلاً في المستودع`}
+        action={
+          <button className="btn-primary" onClick={openAdd}>
+            <Plus size={16} /> إضافة غرض
+          </button>
+        }
+      />
+
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={16} />
+          <input placeholder="ابحث بالاسم أو الكود أو الموقع…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <button type="button" className="search-cam-btn" title="بحث بالكاميرا" onClick={() => setSearchCameraOpen(true)}>
+            <Camera size={15} />
+          </button>
+        </div>
+        <button className="btn-ghost" onClick={() => downloadCSV("قائمة_الاغراض.csv", data.items, ["code", "name", "category", "notes"])}>
+          <Download size={15} /> تصدير CSV
+        </button>
+      </div>
+
+      {searchCameraOpen && (
+        <BarcodeCameraModal
+          onClose={() => setSearchCameraOpen(false)}
+          onDetect={(code) => { setQuery(code); setSearchCameraOpen(false); }}
+        />
+      )}
+
+      <div className="panel">
+        {filtered.length === 0 ? (
+          <EmptyState icon={Package} title="لا توجد أصناف مطابقة" hint="جرّب كلمة بحث مختلفة أو أضف صنفاً جديداً" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead>
+                <tr>
+                  <th>م</th>
+                  <th>الكود</th>
+                  <th>اسم المنتج</th>
+                  <th>الموقع / الفئة</th>
+                  <th>ملاحظات</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((it, idx) => (
+                  <tr key={it.code}>
+                    <td className="cell-mono">{idx + 1}</td>
+                    <td><CodeTag code={it.code} /></td>
+                    <td className="cell-strong">{it.name}</td>
+                    <td className="cell-muted"><MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}</td>
+                    <td className="cell-muted">{it.notes || "—"}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
+                        <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
+          <ItemForm item={modal.item} onCancel={() => setModal(null)} onSave={save} />
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">
+            هل أنت متأكد من حذف «{confirmDelete.name}»؟ لن يؤثر هذا على السجلات السابقة في الداخل والخارج.
+          </p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete.code)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function ItemForm({ item, onCancel, onSave }) {
+  const [form, setForm] = useState(item);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const codeRef = React.useRef(null);
+  const nameRef = React.useRef(null);
+
+  useEffect(() => { codeRef.current?.focus(); }, []);
+
+  const handleCodeKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      nameRef.current?.focus();
+    }
+  };
+
+  const handleCameraDetect = (value) => {
+    setCameraOpen(false);
+    setForm((f) => ({ ...f, code: value.trim() }));
+    setTimeout(() => nameRef.current?.focus(), 0);
+  };
+
+  return (
+    <>
+    <div className="form-grid">
+      <Field label={<span className="scan-label"><ScanLine size={13} /> الكود (الباركود) <span className="scan-hint">جاهز للمسح</span></span>}>
+        <div className="scan-input-row">
+          <input
+            ref={codeRef}
+            className="input mono scan-input"
+            value={form.code}
+            onChange={(e) => setForm({ ...form, code: e.target.value.trim() })}
+            onKeyDown={handleCodeKeyDown}
+            placeholder="امسح الباركود أو اكتب الكود يدوياً"
+            autoComplete="off"
+          />
+          <ScanCameraButton onClick={() => setCameraOpen(true)} />
+        </div>
+      </Field>
+      <Field label="اسم المنتج">
+        <input ref={nameRef} className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="اسم الصنف" />
+      </Field>
+      <Field label="الموقع / الفئة">
+        <input className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="مثال: الدولاب البني 1" />
+      </Field>
+      <Field label="ملاحظات">
+        <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" />
+      </Field>
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+    {cameraOpen && <BarcodeCameraModal onDetect={handleCameraDetect} onClose={() => setCameraOpen(false)} />}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  MOVEMENT FORM (shared shape for incoming / outgoing)               */
+/* ------------------------------------------------------------------ */
+
+function MovementPage({ kind, data, setData, notify }) {
+  const isOut = kind === "out";
+  const rows = isOut ? data.outgoing : data.incoming;
+  const [form, setForm] = useState({ code: "", name: "", date: todayISO(), qty: "", notes: "" });
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [scanFlash, setScanFlash] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+
+  const codeInputRef = React.useRef(null);
+  const qtyInputRef = React.useRef(null);
+
+  const inventory = useMemo(() => computeInventory(data), [data]);
+
+  // Keep the scanner "aimed" at the code field — a handheld reader types into
+  // whatever input currently has focus, so refocus it after every reset.
+  useEffect(() => {
+    codeInputRef.current?.focus();
+  }, []);
+
+  const suggestions = form.code
+    ? data.items.filter((i) => i.code.includes(form.code) || i.name.includes(form.code)).slice(0, 6)
+    : [];
+
+  const pick = (item, focusQty = true) => {
+    setForm((f) => ({ ...f, code: item.code, name: item.name }));
+    setSuggestOpen(false);
+    if (focusQty) setTimeout(() => qtyInputRef.current?.focus(), 0);
+  };
+
+  const balanceFor = (code) => inventory.find((i) => i.code === code)?.balance ?? null;
+
+  // Shared resolution logic used by both the handheld-scanner (keyboard Enter)
+  // path and the phone-camera live detection path.
+  const resolveScannedCode = (raw) => {
+    const clean = String(raw).trim();
+    if (!clean) return;
+    const exact = data.items.find((i) => i.code === clean);
+    if (exact) {
+      setScanFlash(true);
+      setTimeout(() => setScanFlash(false), 350);
+      pick(exact);
+      return;
+    }
+    const partial = data.items.filter((i) => i.code.includes(clean) || i.name.includes(clean));
+    if (partial.length === 1) {
+      pick(partial[0]);
+      return;
+    }
+    setForm((f) => ({ ...f, code: clean, name: "" }));
+    notify("لم يتم التعرف على هذا الكود — تأكد من تسجيله في قائمة الأغراض", "error");
+    setTimeout(() => codeInputRef.current?.select(), 0);
+  };
+
+  // Handheld barcode readers act like a keyboard: they "type" every digit of
+  // the code within milliseconds, then send an Enter keystroke. We resolve
+  // the item as soon as Enter arrives, so scanning needs zero clicks.
+  const handleCodeKeyDown = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    resolveScannedCode(form.code);
+  };
+
+  const handleCameraDetect = (value) => {
+    setCameraOpen(false);
+    resolveScannedCode(value);
+  };
+
+  const handleQtyKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  const submit = () => {
+    const item = data.items.find((i) => i.code === form.code);
+    if (!item) {
+      notify("هذا الكود غير موجود في قائمة الأغراض", "error");
+      return;
+    }
+    const qty = Number(form.qty);
+    if (!qty || qty <= 0) {
+      notify("أدخل كمية صحيحة أكبر من صفر", "error");
+      return;
+    }
+    if (isOut) {
+      const bal = balanceFor(form.code) ?? 0;
+      if (qty > bal) {
+        notify(`الكمية غير كافية — المتوفر حالياً ${bal} فقط`, "error");
+        return;
+      }
+    }
+    const entry = { id: kind + "-" + Date.now(), code: form.code, name: item.name, date: form.date || todayISO(), qty, notes: form.notes };
+    const key = isOut ? "outgoing" : "incoming";
+    setData({ ...data, [key]: [entry, ...rows] });
+    setForm({ code: "", name: "", date: todayISO(), qty: "", notes: "" });
+    notify(isOut ? "تم تسجيل خروج البضاعة" : "تم تسجيل دخول البضاعة");
+    setTimeout(() => codeInputRef.current?.focus(), 0);
+  };
+
+  const sorted = [...rows].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const currentBalance = form.code ? balanceFor(form.code) : null;
+  const insufficient = isOut && form.code && Number(form.qty) > (currentBalance ?? 0);
+  const notFound = form.code && !data.items.some((i) => i.code === form.code);
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow={isOut ? "الحركة" : "الحركة"}
+        title={isOut ? "تسجيل الخارج" : "تسجيل الداخل"}
+        subtitle={isOut ? "إخراج بضاعة من المستودع" : "استلام بضاعة جديدة إلى المستودع"}
+      />
+
+      <div className="panel form-panel">
+        <div className="form-grid form-grid-move">
+          <Field label={<span className="scan-label"><ScanLine size={13} /> كود المنتج <span className="scan-hint">جاهز للمسح</span></span>}>
+            <div className="autocomplete">
+              <div className="scan-input-row">
+                <input
+                  ref={codeInputRef}
+                  className={`input mono scan-input ${scanFlash ? "scan-flash" : ""}`}
+                  value={form.code}
+                  onChange={(e) => { setForm({ ...form, code: e.target.value, name: "" }); setSuggestOpen(true); }}
+                  onFocus={() => setSuggestOpen(true)}
+                  onKeyDown={handleCodeKeyDown}
+                  placeholder="وجّه قارئ الباركود إلى هنا وامسح…"
+                  autoComplete="off"
+                />
+                <ScanCameraButton onClick={() => setCameraOpen(true)} />
+              </div>
+              {suggestOpen && suggestions.length > 0 && (
+                <div className="suggest-list">
+                  {suggestions.map((s) => (
+                    <button key={s.code} className="suggest-item" onClick={() => pick(s)}>
+                      <CodeTag code={s.code} />
+                      <span>{s.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Field>
+          <Field label="اسم المنتج">
+            <input className="input" value={form.name} disabled placeholder="يُعبأ تلقائياً بعد المسح" />
+          </Field>
+          <Field label="التاريخ">
+            <input className="input mono" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+          </Field>
+          <Field label="الكمية">
+            <input
+              ref={qtyInputRef}
+              className="input mono"
+              type="number"
+              step="0.5"
+              min="0"
+              value={form.qty}
+              onChange={(e) => setForm({ ...form, qty: e.target.value })}
+              onKeyDown={handleQtyKeyDown}
+              placeholder="0 — ثم Enter للتسجيل"
+            />
+          </Field>
+          <Field label="ملاحظات">
+            <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" />
+          </Field>
+        </div>
+
+        {notFound && (
+          <div className="alert alert-error"><AlertTriangle size={15} /> هذا الكود غير مسجّل في قائمة الأغراض — أضِفه أولاً من صفحة «قائمة الأغراض».</div>
+        )}
+        {!notFound && isOut && form.code && (
+          <div className={`alert ${insufficient ? "alert-error" : "alert-info"}`}>
+            {insufficient ? <AlertTriangle size={15} /> : <Boxes size={15} />}
+            الرصيد المتوفر حالياً من «{form.name || form.code}»: <b className="mono">{currentBalance}</b>
+            {insufficient && " — الكمية المطلوبة أكبر من المتوفر"}
+          </div>
+        )}
+
+        <div className="form-actions">
+          <button className={isOut ? "btn-danger" : "btn-primary"} onClick={submit}>
+            {isOut ? <ArrowUpFromLine size={16} /> : <ArrowDownToLine size={16} />}
+            {isOut ? "تسجيل الخروج" : "تسجيل الدخول"}
+          </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <span className="panel-title">السجل السابق</span>
+          <span className="panel-sub">{rows.length} حركة مسجّلة</span>
+        </div>
+        {sorted.length === 0 ? (
+          <EmptyState icon={isOut ? ArrowUpFromLine : ArrowDownToLine} title="لا توجد حركات مسجّلة بعد" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead>
+                <tr>
+                  <th>الكود</th>
+                  <th>اسم المنتج</th>
+                  <th>التاريخ</th>
+                  <th>الكمية</th>
+                  <th>ملاحظات</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((r) => (
+                  <tr key={r.id}>
+                    <td><CodeTag code={r.code} /></td>
+                    <td className="cell-strong">{r.name}</td>
+                    <td className="cell-mono">{fmtDate(r.date)}</td>
+                    <td className="cell-mono">{r.qty}</td>
+                    <td className="cell-muted">{r.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {cameraOpen && (
+        <BarcodeCameraModal onDetect={handleCameraDetect} onClose={() => setCameraOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  INVENTORY PAGE                                                     */
+/* ------------------------------------------------------------------ */
+
+function InventoryPage({ inventory }) {
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("name");
+  const [sortDir, setSortDir] = useState(1);
+  const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+
+  const filtered = inventory
+    .filter((i) => (i.name + i.code + i.category).toLowerCase().includes(query.toLowerCase()))
+    .filter((i) => statusFilter === "all" || i.status === statusFilter)
+    .sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      if (typeof va === "number") return (va - vb) * sortDir;
+      return String(va).localeCompare(String(vb), "ar") * sortDir;
+    });
+
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir((d) => -d);
+    else { setSortKey(key); setSortDir(1); }
+  };
+
+  const SortHeader = ({ label, k }) => (
+    <th onClick={() => toggleSort(k)} className="sortable">
+      {label} {sortKey === k && <ChevronDown size={12} style={{ transform: sortDir === -1 ? "rotate(180deg)" : "none", display: "inline" }} />}
+    </th>
+  );
+
+  return (
+    <div className="page">
+      <PageHeader eyebrow="الجرد" title="المخزون" subtitle="الأرصدة الحالية محسوبة تلقائياً من حركات الدخول والخروج" />
+
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={16} />
+          <input placeholder="ابحث بالاسم أو الكود…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <button type="button" className="search-cam-btn" title="بحث بالكاميرا" onClick={() => setSearchCameraOpen(true)}>
+            <Camera size={15} />
+          </button>
+        </div>
+        <div className="filter-chips">
+          {[
+            { k: "all", label: "الكل" },
+            { k: "available", label: "متوفر" },
+            { k: "low", label: "منخفض" },
+            { k: "empty", label: "نفد" },
+          ].map((f) => (
+            <button key={f.k} className={`chip ${statusFilter === f.k ? "chip-active" : ""}`} onClick={() => setStatusFilter(f.k)}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <button
+          className="btn-ghost"
+          onClick={() => downloadCSV("المخزون.csv", filtered, ["code", "name", "category", "inQty", "outQty", "balance", "status"])}
+        >
+          <Download size={15} /> تصدير CSV
+        </button>
+      </div>
+
+      {searchCameraOpen && (
+        <BarcodeCameraModal
+          onClose={() => setSearchCameraOpen(false)}
+          onDetect={(code) => { setQuery(code); setSearchCameraOpen(false); }}
+        />
+      )}
+
+      <div className="panel">
+        {filtered.length === 0 ? (
+          <EmptyState icon={Boxes} title="لا توجد نتائج" hint="جرّب تغيير الفلتر أو كلمة البحث" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead>
+                <tr>
+                  <SortHeader label="الكود" k="code" />
+                  <SortHeader label="اسم المنتج" k="name" />
+                  <SortHeader label="الفئة / الموقع" k="category" />
+                  <SortHeader label="الداخل" k="inQty" />
+                  <SortHeader label="الخارج" k="outQty" />
+                  <SortHeader label="الرصيد" k="balance" />
+                  <th>الحالة</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((i) => (
+                  <tr key={i.code}>
+                    <td><CodeTag code={i.code} /></td>
+                    <td className="cell-strong">{i.name}</td>
+                    <td className="cell-muted">{i.category || "—"}</td>
+                    <td className="cell-mono">{i.inQty}</td>
+                    <td className="cell-mono">{i.outQty}</td>
+                    <td className="cell-mono cell-balance">{i.balance}</td>
+                    <td><StampBadge status={i.status} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  BARCODES PAGE                                                      */
+/* ------------------------------------------------------------------ */
+
+function BarcodesPage({ data, setData, notify }) {
+  const [modal, setModal] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const openAdd = () => setModal({ mode: "add", row: { name: "", number: "" } });
+  const openEdit = (row, idx) => setModal({ mode: "edit", row: { ...row }, idx });
+
+  const save = (row) => {
+    if (!row.name.trim() || !row.number.trim()) {
+      notify("الاسم والرقم مطلوبان", "error");
+      return;
+    }
+    let barcodes;
+    if (modal.mode === "add") barcodes = [...data.barcodes, row];
+    else barcodes = data.barcodes.map((b, i) => (i === modal.idx ? row : b));
+    setData({ ...data, barcodes });
+    setModal(null);
+    notify(modal.mode === "add" ? "تمت إضافة الباركود" : "تم حفظ التعديلات");
+  };
+
+  const remove = (idx) => {
+    setData({ ...data, barcodes: data.barcodes.filter((_, i) => i !== idx) });
+    setConfirmDelete(null);
+    notify("تم الحذف");
+  };
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="مرجع"
+        title="باركودات الأشياء غير المعنونة"
+        subtitle="أشياء بلا كود مسجّل في قائمة الأغراض، مع رقمها القابل للطباعة"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة باركود</button>}
+      />
+
+      <div className="panel">
+        {data.barcodes.length === 0 ? (
+          <EmptyState icon={Barcode} title="لا توجد باركودات مسجّلة" />
+        ) : (
+          <div className="barcode-grid">
+            {data.barcodes.map((b, idx) => (
+              <div className="barcode-card" key={idx}>
+                <div className="barcode-stripes" aria-hidden="true">
+                  {Array.from({ length: 28 }).map((_, i) => (
+                    <span key={i} style={{ width: (i % 5 === 0 ? 3 : 1) + "px" }} />
+                  ))}
+                </div>
+                <div className="barcode-number">{b.number}</div>
+                <div className="barcode-name">{b.name}</div>
+                <div className="row-actions barcode-actions">
+                  <button className="icon-btn" onClick={() => openEdit(b, idx)}><Pencil size={14} /></button>
+                  <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(idx)}><Trash2 size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal title={modal.mode === "add" ? "إضافة باركود" : "تعديل الباركود"} onClose={() => setModal(null)}>
+          <BarcodeForm row={modal.row} onCancel={() => setModal(null)} onSave={save} />
+        </Modal>
+      )}
+
+      {confirmDelete !== null && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">هل تريد حذف هذا الباركود؟</p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function BarcodeForm({ row, onCancel, onSave }) {
+  const [form, setForm] = useState(row);
+  return (
+    <div className="form-grid">
+      <Field label="اسم الشيء">
+        <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="الرقم">
+        <input className="input mono" value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} />
+      </Field>
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  GLOBAL SEARCH                                                      */
+/* ------------------------------------------------------------------ */
+
+function GlobalSearch({ data, inventory, go }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+  const results = q.length > 1
+    ? inventory.filter((i) => (i.name + i.code).toLowerCase().includes(q.toLowerCase())).slice(0, 6)
+    : [];
+
+  return (
+    <div className="global-search">
+      <Search size={15} />
+      <input
+        placeholder="بحث عام بالكود أو الاسم…"
+        value={q}
+        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      <button
+        type="button"
+        className="search-cam-btn"
+        title="بحث بالكاميرا"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setSearchCameraOpen(true)}
+      >
+        <Camera size={15} />
+      </button>
+      {searchCameraOpen && (
+        <BarcodeCameraModal
+          onClose={() => setSearchCameraOpen(false)}
+          onDetect={(code) => { setQ(code); setOpen(true); setSearchCameraOpen(false); }}
+        />
+      )}
+      {open && results.length > 0 && (
+        <div className="global-results">
+          {results.map((r) => (
+            <button key={r.code} className="global-result-item" onMouseDown={() => { go("inventory"); setQ(""); setOpen(false); }}>
+              <div>
+                <div className="cell-strong">{r.name}</div>
+                <CodeTag code={r.code} />
+              </div>
+              <StampBadge status={r.status} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  SHELL                                                              */
+/* ------------------------------------------------------------------ */
+
+const NAV = [
+  { key: "dashboard", label: "لوحة التحكم", icon: LayoutGrid },
+  { key: "items", label: "قائمة الأغراض", icon: Package },
+  { key: "incoming", label: "تسجيل الداخل", icon: ArrowDownToLine },
+  { key: "outgoing", label: "تسجيل الخارج", icon: ArrowUpFromLine },
+  { key: "inventory", label: "المخزون", icon: Boxes },
+  { key: "barcodes", label: "باركودات غير معنونة", icon: Barcode },
+];
+
+function App() {
+  const [data, setData, saving, sync] = useStore();
+  const [page, setPage] = useState("dashboard");
+  const [toast, setToast] = useState(null);
+  const [navOpen, setNavOpen] = useState(false);
+
+  const notify = useCallback((msg, type = "success") => {
+    setToast({ msg, type, id: Date.now() });
+    setTimeout(() => setToast((t) => (t?.msg === msg ? null : t)), 2600);
+  }, []);
+
+  const inventory = useMemo(() => (data ? computeInventory(data) : []), [data]);
+
+  if (!data) {
+    return (
+      <div className="boot-screen">
+        <FontStyles />
+        <div className="boot-mark">📦</div>
+        <div>جارٍ تحضير سجل المستودع…</div>
+      </div>
+    );
+  }
+
+  const go = (p) => { setPage(p); setNavOpen(false); };
+
+  return (
+    <div className="app-shell">
+      <FontStyles />
+      <aside className={`sidebar ${navOpen ? "sidebar-open" : ""}`}>
+        <div className="brand">
+          <div className="brand-mark">
+            <Boxes size={20} strokeWidth={2.2} />
+          </div>
+          <div>
+            <div className="brand-title">سجلّ المستودع</div>
+            <div className="brand-sub">Warehouse Manifest</div>
+          </div>
+        </div>
+
+        <nav className="nav-list">
+          {NAV.map((n, i) => (
+            <button key={n.key} className={`nav-item ${page === n.key ? "nav-item-active" : ""}`} onClick={() => go(n.key)}>
+              <span className="nav-index">{String(i + 1).padStart(2, "0")}</span>
+              <n.icon size={17} strokeWidth={2} />
+              <span>{n.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-foot">
+          <div className={`save-indicator ${saving ? "save-active" : ""}`}>
+            <span className="save-dot" /> {saving ? "جارٍ الحفظ…" : "محفوظ تلقائياً"}
+          </div>
+          <div className={`sync-indicator ${sync.online ? "" : "sync-offline"}`}>
+            <span className="save-dot" /> {sync.online ? "محفوظ على هذا الجهاز" : "غير متصل"}
+          </div>
+        </div>
+      </aside>
+
+      <div className="main-col">
+        <header className="topbar">
+          <button className="hamburger" onClick={() => setNavOpen((v) => !v)} aria-label="القائمة">
+            <span /><span /><span />
+          </button>
+          <GlobalSearch data={data} inventory={inventory} go={go} />
+        </header>
+
+        <main className="main-area">
+          {page === "dashboard" && <Dashboard inventory={inventory} data={data} go={go} />}
+          {page === "items" && <ItemsPage data={data} setData={setData} notify={notify} />}
+          {page === "incoming" && <MovementPage kind="in" data={data} setData={setData} notify={notify} />}
+          {page === "outgoing" && <MovementPage kind="out" data={data} setData={setData} notify={notify} />}
+          {page === "inventory" && <InventoryPage inventory={inventory} />}
+          {page === "barcodes" && <BarcodesPage data={data} setData={setData} notify={notify} />}
+        </main>
+      </div>
+
+      <Toast toast={toast} />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  STYLES                                                             */
+/* ------------------------------------------------------------------ */
+
+function FontStyles() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@400;700;800&family=Tajawal:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+      :root {
+        --kraft: #ECE2CC;
+        --kraft-deep: #E1D3B2;
+        --paper: #F8F3E7;
+        --ink: #23303A;
+        --ink-soft: #5B6570;
+        --line: #C9BA96;
+        --navy: #2B3B47;
+        --green: #3F6D4E;
+        --green-bg: #E9F1E9;
+        --amber: #B3792C;
+        --amber-bg: #FBF0DD;
+        --red: #B23A2E;
+        --red-bg: #FAE6E2;
+      }
+
+      * { box-sizing: border-box; }
+
+      .app-shell, .boot-screen {
+        direction: rtl;
+        font-family: 'Tajawal', sans-serif;
+        color: var(--ink);
+        background: var(--paper);
+        background-image:
+          linear-gradient(var(--paper), var(--paper)),
+          repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(35,48,58,0.025) 28px);
+      }
+
+      .boot-screen {
+        height: 100vh; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+        font-size: 14px; color: var(--ink-soft);
+      }
+      .boot-mark { font-size: 34px; }
+
+      .app-shell {
+        display: flex;
+        min-height: 100vh;
+        width: 100%;
+      }
+
+      .mono, .cell-mono, .code-tag, input.mono { font-family: 'JetBrains Mono', monospace; }
+
+      /* ---------- SIDEBAR ---------- */
+      .sidebar {
+        width: 240px;
+        flex-shrink: 0;
+        background: var(--kraft);
+        border-left: 1px dashed var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 18px 14px;
+        gap: 22px;
+      }
+      .brand { display: flex; align-items: center; gap: 10px; padding: 0 4px; }
+      .brand-mark {
+        width: 38px; height: 38px; border-radius: 8px; background: var(--navy); color: #F3EEDD;
+        display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      }
+      .brand-title { font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 15px; line-height: 1.3; }
+      .brand-sub { font-size: 10.5px; color: var(--ink-soft); letter-spacing: 0.04em; font-family: 'JetBrains Mono', monospace; }
+
+      .nav-list { display: flex; flex-direction: column; gap: 3px; }
+      .nav-item {
+        display: flex; align-items: center; gap: 10px;
+        background: transparent; border: none; cursor: pointer;
+        padding: 10px 10px; border-radius: 8px;
+        font-family: 'Tajawal', sans-serif; font-size: 13.5px; font-weight: 500;
+        color: var(--ink); text-align: right; transition: background 0.15s ease;
+      }
+      .nav-index {
+        font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--ink-soft);
+        width: 16px;
+      }
+      .nav-item:hover { background: rgba(43,59,71,0.06); }
+      .nav-item-active { background: var(--navy); color: #F3EEDD; }
+      .nav-item-active .nav-index { color: rgba(243,238,221,0.55); }
+
+      .sidebar-foot { margin-top: auto; padding: 0 4px; }
+      .save-indicator { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-soft); font-family: 'JetBrains Mono', monospace; }
+      .save-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+      .save-active .save-dot { background: var(--amber); animation: pulse 1s infinite ease-in-out; }
+      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+      .sync-indicator { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-soft); font-family: 'JetBrains Mono', monospace; margin-top: 6px; }
+      .sync-offline .save-dot { background: var(--red); }
+
+      /* ---------- MAIN ---------- */
+      .main-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .topbar {
+        display: flex; align-items: center; gap: 12px;
+        padding: 14px 24px; border-bottom: 1px dashed var(--line);
+        position: sticky; top: 0; background: var(--paper); z-index: 5;
+      }
+      .hamburger { display: none; flex-direction: column; gap: 4px; background: none; border: none; cursor: pointer; padding: 6px; }
+      .hamburger span { width: 20px; height: 2px; background: var(--ink); border-radius: 2px; }
+
+      .global-search { position: relative; flex: 1; max-width: 380px; display: flex; align-items: center; gap: 8px;
+        background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--ink-soft);
+      }
+      .global-search input { border: none; outline: none; background: transparent; font-family: 'Tajawal'; font-size: 13px; color: var(--ink); flex: 1; }
+      .global-results { position: absolute; top: 42px; right: 0; left: 0; background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(35,48,58,0.12); overflow: hidden; z-index: 20; }
+      .global-result-item { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; background: none; border: none; border-bottom: 1px solid #eee2c9; cursor: pointer; text-align: right; }
+      .global-result-item:last-child { border-bottom: none; }
+      .global-result-item:hover { background: #FAF6EA; }
+
+      .main-area { padding: 24px 28px 60px; flex: 1; }
+
+      .page { display: flex; flex-direction: column; gap: 18px; max-width: 1180px; }
+
+      .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .page-eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.08em; color: var(--amber); text-transform: uppercase; margin-bottom: 4px; }
+      .page-title { font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 24px; margin: 0; color: var(--navy); }
+      .page-subtitle { margin: 4px 0 0; font-size: 13px; color: var(--ink-soft); }
+
+      /* ---------- STAT CARDS ---------- */
+      .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+      .stat-card {
+        background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 8px; cursor: pointer;
+        text-align: right; transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+      .stat-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(35,48,58,0.08); }
+      .stat-value { font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 26px; }
+      .stat-label { font-size: 12.5px; color: var(--ink-soft); }
+      .tone-navy svg { color: var(--navy); } .tone-navy .stat-value { color: var(--navy); }
+      .tone-green svg { color: var(--green); } .tone-green .stat-value { color: var(--green); }
+      .tone-amber svg { color: var(--amber); } .tone-amber .stat-value { color: var(--amber); }
+      .tone-red svg { color: var(--red); } .tone-red .stat-value { color: var(--red); }
+
+      /* ---------- PANEL / TABLE ---------- */
+      .panel { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 4px; }
+      .panel-head { display: flex; align-items: baseline; justify-content: space-between; padding: 14px 18px 10px; }
+      .panel-title { font-family: 'Almarai', sans-serif; font-weight: 700; font-size: 14.5px; }
+      .panel-sub { font-size: 11.5px; color: var(--ink-soft); font-family: 'JetBrains Mono', monospace; }
+
+      .table-wrap { overflow-x: auto; }
+      .ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .ledger-table th {
+        text-align: right; font-family: 'Tajawal'; font-weight: 700; font-size: 11.5px; color: var(--ink-soft);
+        padding: 8px 14px; border-top: 1px dashed var(--line); border-bottom: 1px solid var(--line); white-space: nowrap;
+      }
+      .ledger-table th.sortable { cursor: pointer; user-select: none; }
+      .ledger-table td { padding: 11px 14px; border-bottom: 1px solid #F0E9D6; white-space: nowrap; }
+      .ledger-table tr:last-child td { border-bottom: none; }
+      .ledger-table tr:hover td { background: #FBF8F0; }
+      .cell-strong { font-weight: 700; }
+      .cell-muted { color: var(--ink-soft); font-size: 12.5px; }
+      .cell-mono { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+      .cell-balance { font-weight: 700; }
+
+      .code-tag { display: inline-flex; align-items: center; gap: 5px; background: #F3EEDD; border: 1px solid var(--line); border-radius: 5px; padding: 3px 7px; font-size: 11.5px; color: var(--ink); }
+
+      .stamp-badge {
+        display: inline-block; font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 11px;
+        padding: 4px 10px; border: 1.5px solid; border-radius: 20px; letter-spacing: 0.01em;
+      }
+
+      .move-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; padding: 4px 9px; border-radius: 20px; }
+      .move-in { background: var(--green-bg); color: var(--green); }
+      .move-out { background: var(--red-bg); color: var(--red); }
+
+      /* ---------- TOOLBAR ---------- */
+      .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .search-box { display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: 9px; padding: 9px 13px; flex: 1; min-width: 220px; color: var(--ink-soft); }
+      .search-box input { border: none; outline: none; background: transparent; font-family: 'Tajawal'; font-size: 13px; flex: 1; color: var(--ink); }
+      .search-cam-btn {
+        display: inline-flex; align-items: center; justify-content: center; flex: none;
+        width: 28px; height: 28px; border-radius: 7px; border: none; cursor: pointer;
+        background: var(--navy); color: #F3EEDD; margin-inline-start: 2px;
+      }
+      .search-cam-btn:hover { background: #1E2A33; }
+      .filter-chips { display: flex; gap: 6px; }
+      .chip { border: 1px solid var(--line); background: #fff; border-radius: 20px; padding: 7px 14px; font-size: 12px; font-family: 'Tajawal'; font-weight: 500; cursor: pointer; color: var(--ink-soft); }
+      .chip-active { background: var(--navy); border-color: var(--navy); color: #F3EEDD; }
+
+      /* ---------- BUTTONS ---------- */
+      .btn-primary, .btn-ghost, .btn-danger {
+        display: inline-flex; align-items: center; gap: 7px; font-family: 'Tajawal'; font-weight: 700; font-size: 13px;
+        border-radius: 9px; padding: 9px 16px; cursor: pointer; border: 1px solid transparent; white-space: nowrap;
+      }
+      .btn-primary { background: var(--navy); color: #F3EEDD; }
+      .btn-primary:hover { background: #1E2A33; }
+      .btn-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
+      .btn-ghost:hover { background: #FAF6EA; }
+      .btn-danger { background: var(--red); color: #fff; }
+      .btn-danger:hover { background: #98301F; }
+
+      .icon-btn { background: none; border: none; cursor: pointer; padding: 6px; border-radius: 7px; color: var(--ink-soft); display: inline-flex; }
+      .icon-btn:hover { background: #F0E9D6; color: var(--ink); }
+      .icon-btn-danger:hover { background: var(--red-bg); color: var(--red); }
+      .row-actions { display: flex; gap: 2px; }
+
+      /* ---------- FORMS ---------- */
+      .form-panel { padding: 18px; }
+      .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .form-grid-move { grid-template-columns: 1fr 1fr 1fr; }
+      .field { display: flex; flex-direction: column; gap: 6px; position: relative; }
+      .field-label { font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+      .scan-label { display: inline-flex; align-items: center; gap: 5px; }
+      .scan-hint {
+        font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 600; color: var(--green);
+        background: var(--green-bg); padding: 1.5px 7px; border-radius: 10px; letter-spacing: 0.02em;
+        animation: scan-breathe 1.6s ease-in-out infinite;
+      }
+      @keyframes scan-breathe { 0%,100% { opacity: 0.65; } 50% { opacity: 1; } }
+      .scan-input { border-color: var(--green); box-shadow: 0 0 0 3px rgba(63,109,78,0.08); }
+      .scan-input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(63,109,78,0.14); }
+      .scan-flash { animation: scan-flash-anim 0.35s ease; }
+      @keyframes scan-flash-anim {
+        0% { background: var(--green-bg); border-color: var(--green); }
+        100% { background: var(--paper); }
+      }
+
+      .scan-input-row { display: flex; gap: 6px; align-items: stretch; }
+      .scan-input-row .scan-input { flex: 1; min-width: 0; }
+      .scan-camera-btn {
+        display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+        background: var(--navy); color: #F3EEDD; border: none; border-radius: 8px; padding: 0 12px;
+        font-family: 'Tajawal'; font-weight: 700; font-size: 12px; cursor: pointer;
+      }
+      .scan-camera-btn:hover { background: #1E2A33; }
+
+      .camera-sheet { max-width: 460px; }
+      .camera-body { padding: 0; }
+      .camera-frame { position: relative; width: 100%; aspect-ratio: 4 / 5; background: #111; overflow: hidden; }
+      .camera-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .camera-reticle { position: absolute; inset: 14% 10%; pointer-events: none; }
+      .reticle-corner { position: absolute; width: 26px; height: 26px; border: 3px solid #7FE0A0; }
+      .reticle-corner.tl { top: 0; right: 0; border-left: none; border-bottom: none; border-radius: 6px 0 0 0; }
+      .reticle-corner.tr { top: 0; left: 0; border-right: none; border-bottom: none; border-radius: 0 6px 0 0; }
+      .reticle-corner.bl { bottom: 0; right: 0; border-left: none; border-top: none; border-radius: 0 0 0 6px; }
+      .reticle-corner.br { bottom: 0; left: 0; border-right: none; border-top: none; border-radius: 0 0 6px 0; }
+      .reticle-line { position: absolute; right: 0; left: 0; top: 50%; height: 2px; background: #7FE0A0; box-shadow: 0 0 8px #7FE0A0; animation: reticle-sweep 1.6s ease-in-out infinite; }
+      @keyframes reticle-sweep { 0%,100% { top: 12%; } 50% { top: 88%; } }
+      .camera-status {
+        position: absolute; bottom: 12px; right: 50%; transform: translateX(50%);
+        background: rgba(0,0,0,0.55); color: #fff; font-size: 12px; font-family: 'Tajawal'; font-weight: 600;
+        padding: 6px 14px; border-radius: 20px; white-space: nowrap;
+      }
+      .camera-fallback { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 26px 22px; color: var(--ink-soft); }
+      .camera-fallback svg { color: var(--amber); }
+      .camera-fallback p { font-size: 12.5px; line-height: 1.8; margin: 0; }
+      .camera-manual { display: flex; gap: 8px; width: 100%; margin-top: 4px; }
+      .camera-manual .input { flex: 1; }
+      .input {
+        border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font-family: 'Tajawal'; font-size: 13.5px;
+        background: var(--paper); color: var(--ink); outline: none;
+      }
+      .input:focus { border-color: var(--navy); background: #fff; }
+      .input:disabled { color: var(--ink-soft); }
+      .form-actions { display: flex; justify-content: flex-start; margin-top: 14px; }
+
+      .autocomplete { position: relative; }
+      .suggest-list { position: absolute; top: 42px; right: 0; left: 0; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(35,48,58,0.12); z-index: 15; max-height: 220px; overflow-y: auto; }
+      .suggest-item { width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 11px; background: none; border: none; border-bottom: 1px solid #F0E9D6; cursor: pointer; text-align: right; font-size: 12.5px; }
+      .suggest-item:last-child { border-bottom: none; }
+      .suggest-item:hover { background: #FAF6EA; }
+
+      .alert { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 10px 13px; border-radius: 8px; margin-top: 12px; }
+      .alert-error { background: var(--red-bg); color: var(--red); }
+      .alert-info { background: #EAF1F5; color: var(--navy); }
+
+      /* ---------- MODAL ---------- */
+      .modal-overlay { position: fixed; inset: 0; background: rgba(35,48,58,0.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+      .modal-sheet { background: var(--paper); border-radius: 14px; width: 100%; max-width: 420px; border: 1px solid var(--line); overflow: hidden; }
+      .modal-sheet-wide { max-width: 640px; }
+      .modal-sheet-wide .modal-body { padding: 24px 26px; }
+      .modal-sheet-wide .form-grid { gap: 18px 22px; }
+      .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px dashed var(--line); }
+      .modal-title { font-family: 'Almarai'; font-weight: 800; font-size: 14.5px; }
+      .modal-body { padding: 18px; }
+      .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; grid-column: 1 / -1; }
+      .confirm-text { font-size: 13px; color: var(--ink); line-height: 1.7; margin: 0; }
+
+      /* ---------- EMPTY STATE ---------- */
+      .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 46px 20px; color: var(--ink-soft); text-align: center; }
+      .empty-title { font-weight: 700; font-size: 13.5px; color: var(--ink); }
+      .empty-hint { font-size: 12px; }
+
+      /* ---------- BARCODE CARDS ---------- */
+      .barcode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; padding: 14px; }
+      .barcode-card { position: relative; background: #fff; border: 1px dashed var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+      .barcode-stripes { display: flex; gap: 1.5px; height: 32px; align-items: stretch; }
+      .barcode-stripes span { background: var(--ink); display: block; }
+      .barcode-number { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.05em; margin-top: 4px; }
+      .barcode-name { font-size: 12.5px; font-weight: 700; text-align: center; }
+      .barcode-actions { position: absolute; top: 6px; left: 6px; }
+
+      /* ---------- TOAST ---------- */
+      .toast {
+        position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+        display: flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 10px;
+        font-family: 'Tajawal'; font-size: 13px; font-weight: 600; box-shadow: 0 10px 30px rgba(35,48,58,0.2); z-index: 200;
+        animation: toast-in 0.2s ease;
+      }
+      @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+      .toast-success { background: var(--navy); color: #F3EEDD; }
+      .toast-error { background: var(--red); color: #fff; }
+
+      /* ---------- RESPONSIVE ---------- */
+      @media (max-width: 860px) {
+        .stat-grid { grid-template-columns: repeat(2, 1fr); }
+        .form-grid, .form-grid-move { grid-template-columns: 1fr 1fr; }
+        .sidebar { position: fixed; top: 0; bottom: 0; right: 0; z-index: 50; transform: translateX(100%); transition: transform 0.2s ease; box-shadow: -8px 0 24px rgba(0,0,0,0.15); }
+        .sidebar-open { transform: translateX(0); }
+        .hamburger { display: flex; }
+        .main-area { padding: 18px 16px 60px; }
+      }
+      @media (max-width: 520px) {
+        .stat-grid { grid-template-columns: 1fr 1fr; }
+        .form-grid, .form-grid-move { grid-template-columns: 1fr; }
+        .page-title { font-size: 20px; }
+      }
+    `}</style>
+  );
+}
+
+const root = createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
