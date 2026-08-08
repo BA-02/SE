@@ -125,7 +125,8 @@ import { createRoot } from "react-dom/client";
 import {
   Package, ArrowDownToLine, ArrowUpFromLine, Boxes, Barcode, LayoutGrid,
   Search, Plus, Trash2, Pencil, X, Check, AlertTriangle, TriangleAlert,
-  ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert
+  ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert,
+  Users, KeyRound, Layers, Shuffle, Eye, EyeOff
 } from "lucide-react";
 import JsBarcode from "https://esm.sh/jsbarcode@3.11.6";
 
@@ -203,6 +204,60 @@ const seedBarcodes = [
 const LOW_STOCK_THRESHOLD = 10;
 
 /* ------------------------------------------------------------------ */
+/*  USERS (بسيط: اسم مستخدم + كلمة مرور + هل يقدر يعدّل)              */
+/* ------------------------------------------------------------------ */
+
+const DEFAULT_OWNER_PASSWORD = "admin";
+
+// مجموعات تصنيف الأصناف الافتراضية (نوع المنتج، مثل بلاستيك/صحون)، قابلة
+// للتعديل بالكامل من صفحة "المجموعات"
+const DEFAULT_ITEM_GROUPS = [
+  { id: "grp-plastic", name: "بلاستيك" },
+  { id: "grp-dishes", name: "صحون وأدوات مائدة" },
+  { id: "grp-paper", name: "ورقيات" },
+  { id: "grp-cleaning", name: "منظفات" },
+];
+
+// اقتراح إيموجي تلقائي حسب اسم مجموعة الصنف — مجرد اقتراح، يقدر المستخدم يغيّره
+const GROUP_EMOJI_HINTS = [
+  { match: /بلاستيك/, emoji: "🧴" },
+  { match: /صحون|مائدة|أطباق/, emoji: "🍽️" },
+  { match: /ورق/, emoji: "🧻" },
+  { match: /منظف|تنظيف/, emoji: "🧼" },
+  { match: /ماء|مياه/, emoji: "💧" },
+  { match: /كرتون/, emoji: "📦" },
+  { match: /كهرب/, emoji: "⚡" },
+  { match: /سلامة|إطفاء/, emoji: "🧯" },
+  { match: /أدوات|صيانة|عدة/, emoji: "🛠️" },
+  { match: /قرطاسية|مكتب/, emoji: "📎" },
+];
+function suggestEmojiForGroup(groupName) {
+  const hit = GROUP_EMOJI_HINTS.find((h) => h.match.test(groupName || ""));
+  return hit?.emoji || "";
+}
+
+function genId(prefix) {
+  return prefix + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// يضمن وجود إعدادات الحساب/المستخدمين/المجموعات حتى لو كانت بيانات
+// المستودع قديمة (محفوظة قبل إضافة هذه الميزة) دون المساس ببيانات الجرد
+function withDefaults(d) {
+  return {
+    ...d,
+    ownerPassword: d.ownerPassword || DEFAULT_OWNER_PASSWORD,
+    ownerRecoveryQuestion: d.ownerRecoveryQuestion || "",
+    ownerRecoveryAnswer: d.ownerRecoveryAnswer || "",
+    itemGroups: Array.isArray(d.itemGroups) && d.itemGroups.length ? d.itemGroups : DEFAULT_ITEM_GROUPS,
+    users: Array.isArray(d.users) ? d.users.map((u) => ({ canEdit: true, ...u })) : [],
+  };
+}
+
+function isTempExpired(user) {
+  return !!(user?.tempUntil && Date.now() > new Date(user.tempUntil).getTime());
+}
+
+/* ------------------------------------------------------------------ */
 /*  FEEDBACK: sound + haptic                                          */
 /* ------------------------------------------------------------------ */
 let __audioCtx = null;
@@ -275,6 +330,9 @@ function useStore(onRemoteUpdate) {
   const [online, setOnline] = useState(true);
   const [lastSynced, setLastSynced] = useState(null);
   const dataRef = React.useRef(null);
+  // نتذكّر آخر نسخة كتبناها نحن بأنفسنا، حتى نتجاهل صداها القادم عبر
+  // Realtime (لأن Supabase يرسل الحدث للجهاز المُرسِل نفسه أيضاً)
+  const lastLocalWriteRef = React.useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -284,20 +342,22 @@ function useStore(onRemoteUpdate) {
         const res = await window.storage?.get(STORE_KEY, false);
         if (!cancelled) {
           if (res?.value) {
-            dataRef.current = JSON.parse(res.value);
+            dataRef.current = withDefaults(JSON.parse(res.value));
             setData(dataRef.current);
           } else {
-            const seed = { items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes };
+            const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
             dataRef.current = seed;
             setData(seed);
-            await window.storage?.set(STORE_KEY, JSON.stringify(seed), false);
+            const serializedSeed = JSON.stringify(seed);
+            lastLocalWriteRef.current = serializedSeed;
+            await window.storage?.set(STORE_KEY, serializedSeed, false);
           }
           setOnline(true);
           setLastSynced(Date.now());
         }
       } catch {
         if (!cancelled) {
-          const seed = { items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes };
+          const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
           dataRef.current = seed;
           setData(seed);
           setOnline(false);
@@ -307,8 +367,12 @@ function useStore(onRemoteUpdate) {
       if (!cancelled && window.subscribeStorage) {
         unsub = window.subscribeStorage(STORE_KEY, (rawValue, isLocalWrite) => {
           if (cancelled || isLocalWrite) return; // تجاهل صدى تعديلاتنا نحن
+          // تجاهل الحدث إذا كانت القيمة القادمة هي نفسها آخر شيء كتبناه من هذا الجهاز
+          // (Realtime يرسل الحدث لصاحب التعديل أيضاً، وهذا هو مصدر إشعار
+          // "تم تحديث البيانات من جهاز آخر" الذي كان يظهر حتى لتعديلاتنا نحن)
+          if (rawValue === lastLocalWriteRef.current) return;
           try {
-            const next = JSON.parse(rawValue);
+            const next = withDefaults(JSON.parse(rawValue));
             dataRef.current = next;
             setData(next);
             setOnline(true);
@@ -327,8 +391,10 @@ function useStore(onRemoteUpdate) {
     dataRef.current = next;
     setData(next);
     setSaving(true);
+    const serialized = JSON.stringify(next);
+    lastLocalWriteRef.current = serialized;
     try {
-      await window.storage?.set(STORE_KEY, JSON.stringify(next), false);
+      await window.storage?.set(STORE_KEY, serialized, false);
       setOnline(true);
       setLastSynced(Date.now());
       try { localStorage.removeItem(OFFLINE_KEY); } catch {}
@@ -348,6 +414,7 @@ function useStore(onRemoteUpdate) {
       try { pending = localStorage.getItem(OFFLINE_KEY); } catch {}
       if (!pending) return;
       try {
+        lastLocalWriteRef.current = pending;
         await window.storage?.set(STORE_KEY, pending, false);
         try { localStorage.removeItem(OFFLINE_KEY); } catch {}
         setOnline(true);
@@ -366,6 +433,29 @@ function useStore(onRemoteUpdate) {
 /*  HELPERS                                                            */
 /* ------------------------------------------------------------------ */
 
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const today = new Date(todayISO() + "T00:00:00");
+  const target = new Date(dateStr + "T00:00:00");
+  return Math.round((target - today) / 86400000);
+}
+
+function expiryTier(daysLeft) {
+  if (daysLeft === null) return null;
+  if (daysLeft <= 0) return "expired";
+  if (daysLeft <= 7) return "critical";
+  if (daysLeft <= 15) return "warning";
+  if (daysLeft <= 30) return "notice";
+  return null;
+}
+
+const EXPIRY_TIER_META = {
+  expired: { label: "منتهي الصلاحية", ink: "#B23A2E", bg: "#FAE6E2" },
+  critical: { label: "ينتهي خلال 7 أيام", ink: "#B23A2E", bg: "#FAE6E2" },
+  warning: { label: "ينتهي خلال 15 يوماً", ink: "#B3792C", bg: "#FBF0DD" },
+  notice: { label: "ينتهي خلال 30 يوماً", ink: "#8A7A3E", bg: "#F5F0DD" },
+};
+
 function computeInventory(data) {
   const { items, incoming, outgoing } = data;
   return items.map((item) => {
@@ -376,7 +466,9 @@ function computeInventory(data) {
     let status = "available";
     if (balance <= 0) status = "empty";
     else if (balance <= threshold) status = "low";
-    return { ...item, inQty, outQty, balance, status, threshold };
+    const daysLeft = daysUntil(item.expiryDate);
+    const expiry = expiryTier(daysLeft);
+    return { ...item, inQty, outQty, balance, status, threshold, daysLeft, expiry };
   });
 }
 
@@ -425,6 +517,17 @@ function StampBadge({ status }) {
       style={{ color: meta.ink, borderColor: meta.ink, background: meta.bg }}
     >
       {meta.label}
+    </span>
+  );
+}
+
+function ExpiryBadge({ expiry, daysLeft }) {
+  if (!expiry) return null;
+  const meta = EXPIRY_TIER_META[expiry];
+  const label = expiry === "expired" ? meta.label : `${meta.label} (${daysLeft}ي)`;
+  return (
+    <span className="stamp-badge" style={{ color: meta.ink, borderColor: meta.ink, background: meta.bg }}>
+      <Clock size={11} style={{ marginLeft: 3, verticalAlign: "-1px" }} /> {label}
     </span>
   );
 }
@@ -633,7 +736,7 @@ function Field({ label, children }) {
 /*  DASHBOARD                                                          */
 /* ------------------------------------------------------------------ */
 
-function Dashboard({ inventory, data, go, readOnly }) {
+function Dashboard({ inventory, data, go, readOnly, onPrint }) {
   const total = inventory.length;
   const low = inventory.filter((i) => i.status === "low").length;
   const empty = inventory.filter((i) => i.status === "empty").length;
@@ -642,36 +745,51 @@ function Dashboard({ inventory, data, go, readOnly }) {
     () => inventory.filter((i) => i.status !== "available").sort((a, b) => a.balance - b.balance).slice(0, 12),
     [inventory]
   );
+  const expiring = useMemo(
+    () => inventory.filter((i) => i.expiry).sort((a, b) => a.daysLeft - b.daysLeft).slice(0, 12),
+    [inventory]
+  );
+
+  // إشعار نظام حقيقي (خارج المتصفح) عند وجود أصناف حرجة الصلاحية — يُطلب الإذن مرة واحدة فقط
+  useEffect(() => {
+    const urgentExpiring = inventory.filter((i) => i.expiry === "critical" || i.expiry === "expired");
+    if (!urgentExpiring.length || typeof Notification === "undefined") return;
+    const fire = () => {
+      try {
+        new Notification("سجلّ المستودع — تنبيه صلاحية", {
+          body: `${urgentExpiring.length} صنفاً قريب من انتهاء الصلاحية أو منتهي بالفعل`,
+          tag: "warehouse-expiry",
+        });
+      } catch {}
+    };
+    if (Notification.permission === "granted") fire();
+    else if (Notification.permission !== "denied") {
+      Notification.requestPermission().then((p) => { if (p === "granted") fire(); });
+    }
+  }, [inventory]);
 
   const recent = useMemo(() => {
-    const inRows = data.incoming.map((r) => ({ ...r, kind: "in" }));
-    const outRows = data.outgoing.map((r) => ({ ...r, kind: "out" }));
+    const emojiByCode = new Map(data.items.map((it) => [it.code, it.emoji]));
+    const inRows = data.incoming.map((r) => ({ ...r, kind: "in", emoji: emojiByCode.get(r.code) }));
+    const outRows = data.outgoing.map((r) => ({ ...r, kind: "out", emoji: emojiByCode.get(r.code) }));
     return [...inRows, ...outRows]
       .sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.id.localeCompare(a.id))
       .slice(0, 8);
   }, [data]);
 
-  // أكثر الأصناف حركة (دخول + خروج)
-  const topMovers = useMemo(() => {
-    const map = new Map();
-    [...data.incoming, ...data.outgoing].forEach((r) => {
-      map.set(r.code, (map.get(r.code) || 0) + Number(r.qty || 0));
-    });
-    return [...map.entries()]
-      .map(([code, qty]) => ({ code, qty, name: data.items.find((i) => i.code === code)?.name || code }))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, 6);
-  }, [data]);
-
-  // توزيع الأصناف حسب الموقع/الفئة
-  const byLocation = useMemo(() => {
+  // توزيع الأصناف حسب المجموعة (نوع الصنف: بلاستيك، صحون...) — مع النسبة المئوية
+  const byGroup = useMemo(() => {
+    const nameOf = (id) => data.itemGroups.find((g) => g.id === id)?.name;
     const map = new Map();
     inventory.forEach((i) => {
-      const loc = i.category || "بدون موقع";
-      map.set(loc, (map.get(loc) || 0) + 1);
+      const g = nameOf(i.group) || "بدون مجموعة";
+      map.set(g, (map.get(g) || 0) + 1);
     });
-    return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
-  }, [inventory]);
+    const totalItems = inventory.length || 1;
+    return [...map.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, count]) => ({ name, count, pct: Math.round((count / totalItems) * 100) }));
+  }, [inventory, data.itemGroups]);
 
   const stats = [
     { label: "إجمالي الأصناف", value: total, icon: Boxes, tone: "navy", action: () => go(readOnly ? "inventory" : "items") },
@@ -680,14 +798,13 @@ function Dashboard({ inventory, data, go, readOnly }) {
     { label: "نفدت كمياتها", value: empty, icon: AlertTriangle, tone: "red", action: () => go("inventory") },
   ];
 
-  const maxMover = Math.max(1, ...topMovers.map((m) => m.qty));
-  const maxLoc = Math.max(1, ...byLocation.map((l) => l[1]));
+  const maxGroup = Math.max(1, ...byGroup.map((g) => g.count));
 
   return (
     <div className="page">
       <PageHeader
         eyebrow="نظرة عامة" title="لوحة التحكم" subtitle="ملخص سريع لحالة المستودع اليوم"
-        action={<button className="btn-ghost" onClick={() => window.print()}><Download size={15} /> طباعة / PDF</button>}
+        action={<button className="btn-ghost" onClick={() => (onPrint ? onPrint() : window.print())}><Download size={15} /> طباعة / PDF</button>}
       />
 
       {critical.length > 0 && (
@@ -701,6 +818,16 @@ function Dashboard({ inventory, data, go, readOnly }) {
         </div>
       )}
 
+      {expiring.length > 0 && (
+        <div className="alert-banner alert-banner-expiry">
+          <Clock size={18} />
+          <div className="alert-banner-text">
+            <strong>{expiring.length} صنفاً قريب من انتهاء الصلاحية:</strong>{" "}
+            {expiring.map((i) => `${i.name} (${i.daysLeft <= 0 ? "منتهي" : i.daysLeft + "ي"})`).join("، ")}
+          </div>
+        </div>
+      )}
+
       <div className="stat-grid">
         {stats.map((s) => (
           <button key={s.label} className={`stat-card tone-${s.tone}`} onClick={s.action}>
@@ -711,45 +838,23 @@ function Dashboard({ inventory, data, go, readOnly }) {
         ))}
       </div>
 
-      <div className="chart-grid">
-        <div className="panel">
-          <div className="panel-head">
-            <span className="panel-title">أكثر الأصناف حركة</span>
-            <span className="panel-sub">إجمالي الدخول + الخروج لكل صنف</span>
-          </div>
-          <div className="mini-chart">
-            {topMovers.length === 0 ? (
-              <EmptyState icon={Boxes} title="لا توجد بيانات حركة بعد" />
-            ) : topMovers.map((m) => (
-              <div className="mini-chart-row" key={m.code}>
-                <span className="mini-chart-label">{m.name}</span>
-                <div className="mini-chart-track">
-                  <div className="mini-chart-bar" style={{ width: `${(m.qty / maxMover) * 100}%` }} />
-                </div>
-                <span className="mini-chart-val">{m.qty}</span>
-              </div>
-            ))}
-          </div>
+      <div className="panel">
+        <div className="panel-head">
+          <span className="panel-title">توزيع الأصناف حسب المجموعة</span>
+          <span className="panel-sub">نسبة كل مجموعة من إجمالي عدد الأصناف — بلاستيك، صحون، ورقيات…</span>
         </div>
-
-        <div className="panel">
-          <div className="panel-head">
-            <span className="panel-title">توزيع الأصناف حسب الموقع</span>
-            <span className="panel-sub">عدد الأصناف في كل رف / دولاب</span>
-          </div>
-          <div className="mini-chart">
-            {byLocation.length === 0 ? (
-              <EmptyState icon={MapPin} title="لا توجد مواقع مسجّلة" />
-            ) : byLocation.map(([loc, count]) => (
-              <div className="mini-chart-row" key={loc}>
-                <span className="mini-chart-label">{loc}</span>
-                <div className="mini-chart-track">
-                  <div className="mini-chart-bar mini-chart-bar-amber" style={{ width: `${(count / maxLoc) * 100}%` }} />
-                </div>
-                <span className="mini-chart-val">{count}</span>
+        <div className="mini-chart">
+          {byGroup.length === 0 ? (
+            <EmptyState icon={Layers} title="لا توجد مجموعات مسجّلة" />
+          ) : byGroup.map((g) => (
+            <div className="mini-chart-row" key={g.name}>
+              <span className="mini-chart-label">{suggestEmojiForGroup(g.name) ? `${suggestEmojiForGroup(g.name)} ` : ""}{g.name}</span>
+              <div className="mini-chart-track">
+                <div className="mini-chart-bar mini-chart-bar-amber" style={{ width: `${(g.count / maxGroup) * 100}%` }} />
               </div>
-            ))}
-          </div>
+              <span className="mini-chart-val">{g.count} <span className="mini-chart-pct">({g.pct}%)</span></span>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -781,7 +886,7 @@ function Dashboard({ inventory, data, go, readOnly }) {
                         {r.kind === "in" ? "داخل" : "خارج"}
                       </span>
                     </td>
-                    <td className="cell-strong">{r.name}</td>
+                    <td className="cell-strong">{r.emoji ? `${r.emoji} ` : ""}{r.name}</td>
                     <td><CodeTag code={r.code} /></td>
                     <td className="cell-mono">{r.qty}</td>
                     <td className="cell-mono">{fmtDate(r.date)}</td>
@@ -813,7 +918,7 @@ function PageHeader({ eyebrow, title, subtitle, action }) {
 /*  ITEMS PAGE                                                         */
 /* ------------------------------------------------------------------ */
 
-function ItemsPage({ data, setData, notify, readOnly }) {
+function ItemsPage({ data, setData, notify, readOnly, onPrint }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null); // { mode: 'add'|'edit', item }
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -823,7 +928,7 @@ function ItemsPage({ data, setData, notify, readOnly }) {
     (it.name + it.code + it.category).toLowerCase().includes(query.toLowerCase())
   );
 
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "" } });
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -882,7 +987,7 @@ function ItemsPage({ data, setData, notify, readOnly }) {
         <button className="btn-ghost" onClick={() => downloadCSV("قائمة_الاغراض.csv", data.items, ["code", "name", "category", "notes", "minQty"])}>
           <Download size={15} /> تصدير CSV
         </button>
-        <button className="btn-ghost" onClick={() => window.print()}>
+        <button className="btn-ghost" onClick={() => (onPrint ? onPrint() : window.print())}>
           <Download size={15} /> طباعة / PDF
         </button>
         {!readOnly && (
@@ -951,7 +1056,7 @@ function ItemsPage({ data, setData, notify, readOnly }) {
                   <tr key={it.code}>
                     <td className="cell-mono">{idx + 1}</td>
                     <td><CodeTag code={it.code} /></td>
-                    <td className="cell-strong">{it.name}</td>
+                    <td className="cell-strong">{it.emoji ? `${it.emoji} ` : ""}{it.name}</td>
                     <td className="cell-muted"><MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}</td>
                     <td className="cell-muted">{it.notes || "—"}</td>
                     {!readOnly && (
@@ -972,7 +1077,7 @@ function ItemsPage({ data, setData, notify, readOnly }) {
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
-          <ItemForm item={modal.item} onCancel={() => setModal(null)} onSave={save} />
+          <ItemForm item={modal.item} itemGroups={data.itemGroups} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -991,7 +1096,53 @@ function ItemsPage({ data, setData, notify, readOnly }) {
   );
 }
 
-function ItemForm({ item, onCancel, onSave }) {
+/* ------------------------------------------------------------------ */
+/*  EMOJI PICKER (item icon)                                          */
+/* ------------------------------------------------------------------ */
+
+const EMOJI_CHOICES = [
+  "📦", "🧴", "💧", "🚰", "🥤", "🥫", "🧃", "🧻", "🧼", "🧹",
+  "🧯", "🛠️", "🔧", "🔩", "⚡", "🖥️", "🖨️", "☎️", "📎", "📋",
+  "🗂️", "✏️", "🪑", "🛋️", "🚪", "🪜", "🧰", "🪣", "🧱", "🛢️",
+  "⛽", "🧤", "🥽", "🦺", "🩹", "💊", "🧪", "🚗", "🚚", "🏷️",
+];
+
+function EmojiPicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="emoji-picker-wrap">
+      <button type="button" className="emoji-trigger" onClick={() => setOpen((v) => !v)}>
+        <span className="emoji-trigger-glyph">{value || "🏷️"}</span>
+        <span>اختر أيقونة</span>
+        <ChevronDown size={13} />
+      </button>
+      {open && (
+        <div className="emoji-popover">
+          <div className="emoji-grid">
+            {EMOJI_CHOICES.map((em) => (
+              <button
+                type="button" key={em}
+                className={`emoji-cell ${value === em ? "emoji-cell-active" : ""}`}
+                onClick={() => { onChange(em); setOpen(false); }}
+              >
+                {em}
+              </button>
+            ))}
+          </div>
+          <div className="emoji-custom-row">
+            <input
+              className="input" maxLength={4} placeholder="أو الصق أي إيموجي هنا"
+              value={value || ""} onChange={(e) => onChange(e.target.value)}
+            />
+            {value && <button type="button" className="btn-ghost" onClick={() => onChange("")}>مسح</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ItemForm({ item, itemGroups, onCancel, onSave }) {
   const [form, setForm] = useState(item);
   const [cameraOpen, setCameraOpen] = useState(false);
   const codeRef = React.useRef(null);
@@ -1010,6 +1161,13 @@ function ItemForm({ item, onCancel, onSave }) {
     setCameraOpen(false);
     setForm((f) => ({ ...f, code: value.trim() }));
     setTimeout(() => nameRef.current?.focus(), 0);
+  };
+
+  const pickGroup = (groupId) => {
+    const g = itemGroups.find((x) => x.id === groupId);
+    // إذا ما اختار المستخدم إيموجي بعد، نقترح له واحداً يناسب المجموعة
+    const suggested = !form.emoji && g ? suggestEmojiForGroup(g.name) : form.emoji;
+    setForm({ ...form, group: groupId, emoji: suggested });
   };
 
   return (
@@ -1032,6 +1190,15 @@ function ItemForm({ item, onCancel, onSave }) {
       <Field label="اسم المنتج">
         <input ref={nameRef} className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="اسم الصنف" />
       </Field>
+      <Field label="أيقونة الصنف (اختياري)">
+        <EmojiPicker value={form.emoji} onChange={(em) => setForm({ ...form, emoji: em })} />
+      </Field>
+      <Field label="المجموعة (نوع الصنف)">
+        <select className="input" value={form.group || ""} onChange={(e) => pickGroup(e.target.value)}>
+          <option value="">بدون مجموعة</option>
+          {itemGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+      </Field>
       <Field label="الموقع / الفئة">
         <input className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="مثال: الدولاب البني 1" />
       </Field>
@@ -1043,6 +1210,12 @@ function ItemForm({ item, onCancel, onSave }) {
           type="number" min="0" step="0.5" className="input mono"
           value={form.minQty ?? ""} onChange={(e) => setForm({ ...form, minQty: e.target.value })}
           placeholder={String(LOW_STOCK_THRESHOLD)}
+        />
+      </Field>
+      <Field label="تاريخ الصلاحية (اختياري)">
+        <input
+          type="date" className="input mono"
+          value={form.expiryDate ?? ""} onChange={(e) => setForm({ ...form, expiryDate: e.target.value })}
         />
       </Field>
       <div className="modal-actions">
@@ -1236,7 +1409,7 @@ function MovementPage({ kind, data, setData, notify, readOnly }) {
         {!notFound && isOut && form.code && (
           <div className={`alert ${insufficient ? "alert-error" : "alert-info"}`}>
             {insufficient ? <AlertTriangle size={15} /> : <Boxes size={15} />}
-            الرصيد المتوفر حالياً من «{form.name || form.code}»: <b className="mono">{currentBalance}</b>
+            الكمية المتوفرة حالياً من «{form.name || form.code}»: <b className="mono">{currentBalance}</b>
             {insufficient && " — الكمية المطلوبة أكبر من المتوفر"}
           </div>
         )}
@@ -1296,14 +1469,17 @@ function MovementPage({ kind, data, setData, notify, readOnly }) {
 /*  INVENTORY PAGE                                                     */
 /* ------------------------------------------------------------------ */
 
-function InventoryPage({ inventory }) {
+function InventoryPage({ inventory, itemGroups, onPrint }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
-  const [view, setView] = useState("list"); // list | grid
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [view, setView] = useState("grid"); // grid | list — البطاقات هي الوضع الافتراضي
   const [sortKey, setSortKey] = useState("name");
   const [sortDir, setSortDir] = useState(1);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+
+  const groupName = (id) => itemGroups.find((g) => g.id === id)?.name || "";
 
   const locations = useMemo(
     () => [...new Set(inventory.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar")),
@@ -1314,7 +1490,13 @@ function InventoryPage({ inventory }) {
     .filter((i) => (i.name + i.code + i.category).toLowerCase().includes(query.toLowerCase()))
     .filter((i) => statusFilter === "all" || i.status === statusFilter)
     .filter((i) => locationFilter === "all" || i.category === locationFilter)
+    .filter((i) => groupFilter === "all" || i.group === groupFilter)
     .sort((a, b) => {
+      if (sortKey === "daysLeft") {
+        const va = a.daysLeft === null || a.daysLeft === undefined ? Infinity : a.daysLeft;
+        const vb = b.daysLeft === null || b.daysLeft === undefined ? Infinity : b.daysLeft;
+        return (va - vb) * sortDir;
+      }
       const va = a[sortKey], vb = b[sortKey];
       if (typeof va === "number") return (va - vb) * sortDir;
       return String(va).localeCompare(String(vb), "ar") * sortDir;
@@ -1355,6 +1537,12 @@ function InventoryPage({ inventory }) {
             </button>
           ))}
         </div>
+        {itemGroups.length > 0 && (
+          <select className="input location-select" value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
+            <option value="all">كل المجموعات</option>
+            {itemGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+        )}
         {locations.length > 0 && (
           <select className="input location-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
             <option value="all">كل المواقع</option>
@@ -1362,8 +1550,8 @@ function InventoryPage({ inventory }) {
           </select>
         )}
         <div className="view-toggle">
-          <button className={`chip ${view === "list" ? "chip-active" : ""}`} onClick={() => setView("list")}>جدول</button>
           <button className={`chip ${view === "grid" ? "chip-active" : ""}`} onClick={() => setView("grid")}>بطاقات</button>
+          <button className={`chip ${view === "list" ? "chip-active" : ""}`} onClick={() => setView("list")}>جدول</button>
         </div>
         <button
           className="btn-ghost"
@@ -1371,7 +1559,7 @@ function InventoryPage({ inventory }) {
         >
           <Download size={15} /> تصدير CSV
         </button>
-        <button className="btn-ghost" onClick={() => window.print()}>
+        <button className="btn-ghost" onClick={() => (onPrint ? onPrint() : window.print())}>
           <Download size={15} /> طباعة / PDF
         </button>
       </div>
@@ -1391,12 +1579,13 @@ function InventoryPage({ inventory }) {
             {filtered.map((i) => (
               <div className="inv-card" key={i.code}>
                 <div className="inv-card-head">
-                  <span className="cell-strong">{i.name}</span>
+                  <span className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</span>
                   <StampBadge status={i.status} />
                 </div>
                 <CodeTag code={i.code} />
-                <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}</div>
-                <div className="inv-card-balance">{i.balance} <span className="inv-card-balance-unit">الرصيد</span></div>
+                <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}{groupName(i.group) ? ` · ${groupName(i.group)}` : ""}</div>
+                {i.expiry && <ExpiryBadge expiry={i.expiry} daysLeft={i.daysLeft} />}
+                <div className="inv-card-balance">{i.balance} <span className="inv-card-balance-unit">الكمية</span></div>
               </div>
             ))}
           </div>
@@ -1410,20 +1599,22 @@ function InventoryPage({ inventory }) {
                   <SortHeader label="الفئة / الموقع" k="category" />
                   <SortHeader label="الداخل" k="inQty" />
                   <SortHeader label="الخارج" k="outQty" />
-                  <SortHeader label="الرصيد" k="balance" />
+                  <SortHeader label="الكمية" k="balance" />
                   <th>الحالة</th>
+                  <SortHeader label="الصلاحية" k="daysLeft" />
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((i) => (
                   <tr key={i.code}>
                     <td><CodeTag code={i.code} /></td>
-                    <td className="cell-strong">{i.name}</td>
+                    <td className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</td>
                     <td className="cell-muted">{i.category || "—"}</td>
                     <td className="cell-mono">{i.inQty}</td>
                     <td className="cell-mono">{i.outQty}</td>
                     <td className="cell-mono cell-balance">{i.balance}</td>
                     <td><StampBadge status={i.status} /></td>
+                    <td>{i.expiry ? <ExpiryBadge expiry={i.expiry} daysLeft={i.daysLeft} /> : "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1580,7 +1771,7 @@ function GlobalSearch({ data, inventory, go }) {
           {results.map((r) => (
             <button key={r.code} className="global-result-item" onMouseDown={() => { go("inventory"); setQ(""); setOpen(false); }}>
               <div>
-                <div className="cell-strong">{r.name}</div>
+                <div className="cell-strong">{r.emoji ? `${r.emoji} ` : ""}{r.name}</div>
                 <CodeTag code={r.code} />
               </div>
               <StampBadge status={r.status} />
@@ -1604,12 +1795,363 @@ const NAV = [
   { key: "inventory", label: "المخزون", icon: Boxes },
   { key: "barcodes", label: "باركودات غير معنونة", icon: Barcode },
   { key: "audit", label: "سجل النشاط", icon: Hash },
+  { key: "users", label: "المستخدمون", icon: Users, ownerOnly: true },
+  { key: "groups", label: "المجموعات", icon: Layers, ownerOnly: true },
 ];
 
-function AuditPage({ log }) {
+/* ------------------------------------------------------------------ */
+/*  USERS PAGE (site owner only)                                      */
+/* ------------------------------------------------------------------ */
+
+const TEMP_DURATIONS = [
+  { key: "1d", label: "يوم واحد", ms: 24 * 3600 * 1000 },
+  { key: "3d", label: "3 أيام", ms: 3 * 24 * 3600 * 1000 },
+  { key: "7d", label: "7 أيام", ms: 7 * 24 * 3600 * 1000 },
+  { key: "30d", label: "30 يوماً", ms: 30 * 24 * 3600 * 1000 },
+];
+
+function randomPassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+}
+
+function UsersPage({ data, setData, notify }) {
+  const [modal, setModal] = useState(null); // { mode, user }
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const openAdd = () => setModal({ mode: "add", user: { username: "", password: randomPassword(), canEdit: true, temp: false, durationKey: "1d" } });
+  const openEdit = (u) => setModal({ mode: "edit", user: { ...u, temp: !!u.tempUntil, durationKey: "1d" } });
+
+  const save = (form) => {
+    const username = form.username.trim();
+    if (!username || !form.password.trim()) {
+      notify("اسم المستخدم وكلمة المرور مطلوبان", "error");
+      return;
+    }
+    const dup = data.users.some((u) => u.username === username && u.id !== form.id);
+    if (dup) { notify("اسم المستخدم مستخدم بالفعل", "error"); return; }
+
+    const tempUntil = form.temp
+      ? new Date(Date.now() + (TEMP_DURATIONS.find((d) => d.key === form.durationKey)?.ms || 0)).toISOString()
+      : null;
+
+    const record = {
+      id: form.id || genId("user"),
+      username,
+      password: form.password.trim(),
+      canEdit: !!form.canEdit,
+      tempUntil,
+      createdAt: form.createdAt || Date.now(),
+    };
+
+    const exists = data.users.some((u) => u.id === record.id);
+    const users = exists ? data.users.map((u) => (u.id === record.id ? record : u)) : [...data.users, record];
+    setData({ ...data, users });
+    setModal(null);
+    notify(exists ? "تم تحديث بيانات المستخدم" : "تمت إضافة المستخدم");
+  };
+
+  const remove = (id) => {
+    setData({ ...data, users: data.users.filter((u) => u.id !== id) });
+    setConfirmDelete(null);
+    notify("تم حذف المستخدم");
+  };
+
   return (
     <div className="page">
-      <PageHeader eyebrow="تدقيق" title="سجل النشاط" subtitle="آخر العمليات التي جرت في هذه الجلسة على هذا الجهاز" />
+      <PageHeader
+        eyebrow="إدارة الوصول" title="المستخدمون" subtitle="حسابات دخول بكلمة مرور دائمة أو مؤقتة، مع تحديد هل يقدر يعدّل أو للقراءة فقط"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة مستخدم</button>}
+      />
+      <div className="panel">
+        {data.users.length === 0 ? (
+          <EmptyState icon={Users} title="لا يوجد مستخدمون بعد" hint="أضف مستخدماً بكلمة مرور دائمة أو مؤقتة" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead>
+                <tr><th>اسم المستخدم</th><th>الصلاحية</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
+              </thead>
+              <tbody>
+                {data.users.map((u) => {
+                  const expired = isTempExpired(u);
+                  return (
+                    <tr key={u.id}>
+                      <td className="cell-strong">{u.username}</td>
+                      <td>
+                        <span className="stamp-badge" style={u.canEdit
+                          ? { color: "#3F6D4E", borderColor: "#3F6D4E", background: "#E9F1E9" }
+                          : { color: "#5B6570", borderColor: "#5B6570", background: "#EEE9DA" }}>
+                          {u.canEdit ? "يقدر يعدّل" : "قراءة فقط"}
+                        </span>
+                      </td>
+                      <td className="cell-mono">{u.password}</td>
+                      <td>
+                        {u.tempUntil ? (
+                          <span className="stamp-badge" style={{
+                            color: expired ? "#B23A2E" : "#B3792C",
+                            borderColor: expired ? "#B23A2E" : "#B3792C",
+                            background: expired ? "#FAE6E2" : "#FBF0DD",
+                          }}>
+                            <KeyRound size={11} style={{ marginLeft: 3, verticalAlign: "-1px" }} />
+                            {expired ? "منتهية" : `مؤقتة حتى ${new Date(u.tempUntil).toLocaleString("ar-SA")}`}
+                          </span>
+                        ) : (
+                          <span className="stamp-badge" style={{ color: "#3F6D4E", borderColor: "#3F6D4E", background: "#E9F1E9" }}>دائمة</span>
+                        )}
+                      </td>
+                      <td>
+                        <div className="row-actions">
+                          <button className="icon-btn" onClick={() => openEdit(u)}><Pencil size={15} /></button>
+                          <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(u)}><Trash2 size={15} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal wide title={modal.mode === "add" ? "إضافة مستخدم" : "تعديل المستخدم"} onClose={() => setModal(null)}>
+          <UserForm user={modal.user} onCancel={() => setModal(null)} onSave={save} />
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">هل تريد حذف المستخدم «{confirmDelete.username}»؟ لن يتمكن من الدخول بعدها.</p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete.id)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function UserForm({ user, onCancel, onSave }) {
+  const [form, setForm] = useState(user);
+  const [showPass, setShowPass] = useState(false);
+
+  return (
+    <div className="form-grid">
+      <Field label="اسم المستخدم">
+        <input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="مثال: mohammed" />
+      </Field>
+      <Field label="كلمة المرور">
+        <div className="scan-input-row">
+          <input
+            type={showPass ? "text" : "password"} className="input mono scan-input"
+            value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })}
+          />
+          <button type="button" className="scan-camera-btn" onClick={() => setShowPass((v) => !v)} title="إظهار/إخفاء">
+            {showPass ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+          <button type="button" className="scan-camera-btn" onClick={() => setForm({ ...form, password: randomPassword() })} title="توليد كلمة مرور">
+            <Shuffle size={15} />
+          </button>
+        </div>
+      </Field>
+      <Field label="الصلاحية">
+        <div className="login-choices" style={{ gap: 6 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input type="radio" checked={!!form.canEdit} onChange={() => setForm({ ...form, canEdit: true })} /> يقدر يضيف ويعدّل ويحذف
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input type="radio" checked={!form.canEdit} onChange={() => setForm({ ...form, canEdit: false })} /> قراءة فقط
+          </label>
+        </div>
+      </Field>
+      <Field label="نوع كلمة المرور">
+        <div className="login-choices" style={{ gap: 6 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input type="radio" checked={!form.temp} onChange={() => setForm({ ...form, temp: false })} /> دائمة
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input type="radio" checked={!!form.temp} onChange={() => setForm({ ...form, temp: true })} /> مؤقتة (تنتهي تلقائياً)
+          </label>
+        </div>
+      </Field>
+      {form.temp && (
+        <Field label="مدة الصلاحية">
+          <select className="input" value={form.durationKey} onChange={(e) => setForm({ ...form, durationKey: e.target.value })}>
+            {TEMP_DURATIONS.map((d) => <option key={d.key} value={d.key}>{d.label}</option>)}
+          </select>
+        </Field>
+      )}
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+  );
+
+}
+
+/* ------------------------------------------------------------------ */
+/*  GROUPS PAGE (تصنيف الأصناف: بلاستيك، صحون، ورقيات... — إدارة رئيس الموقع) */
+/* ------------------------------------------------------------------ */
+
+function GroupsPage({ data, setData, notify }) {
+  const [modal, setModal] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const countFor = (id) => data.items.filter((i) => i.group === id).length;
+
+  const openAdd = () => setModal({ mode: "add", group: { name: "" } });
+  const openEdit = (g) => setModal({ mode: "edit", group: { ...g } });
+
+  const save = (form) => {
+    if (!form.name.trim()) { notify("اسم المجموعة مطلوب", "error"); return; }
+    const record = { id: form.id || genId("grp"), name: form.name.trim() };
+    const exists = data.itemGroups.some((g) => g.id === record.id);
+    const itemGroups = exists ? data.itemGroups.map((g) => (g.id === record.id ? record : g)) : [...data.itemGroups, record];
+    setData({ ...data, itemGroups });
+    setModal(null);
+    notify(exists ? "تم تحديث المجموعة" : "تمت إضافة المجموعة");
+  };
+
+  const remove = (id) => {
+    // الأصناف المرتبطة بهذه المجموعة تبقى بدون مجموعة بدل ما تُحذف
+    const items = data.items.map((i) => (i.group === id ? { ...i, group: "" } : i));
+    setData({ ...data, itemGroups: data.itemGroups.filter((g) => g.id !== id), items });
+    setConfirmDelete(null);
+    notify("تم حذف المجموعة");
+  };
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="تصنيف الأصناف" title="المجموعات" subtitle="نوع الصنف — مثل بلاستيك، صحون، ورقيات — يسهّل التصفية والتنظيم"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة مجموعة</button>}
+      />
+      <div className="panel">
+        {data.itemGroups.length === 0 ? (
+          <EmptyState icon={Layers} title="لا توجد مجموعات بعد" hint="أضف مجموعة مثل «بلاستيك» أو «صحون» لتصنيف الأصناف عليها" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead><tr><th>اسم المجموعة</th><th>عدد الأصناف</th><th></th></tr></thead>
+              <tbody>
+                {data.itemGroups.map((g) => (
+                  <tr key={g.id}>
+                    <td className="cell-strong">{suggestEmojiForGroup(g.name) ? `${suggestEmojiForGroup(g.name)} ` : ""}{g.name}</td>
+                    <td className="cell-mono">{countFor(g.id)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="icon-btn" onClick={() => openEdit(g)}><Pencil size={15} /></button>
+                        <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(g)}><Trash2 size={15} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal title={modal.mode === "add" ? "إضافة مجموعة" : "تعديل المجموعة"} onClose={() => setModal(null)}>
+          <GroupForm group={modal.group} onCancel={() => setModal(null)} onSave={save} />
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">هل تريد حذف مجموعة «{confirmDelete.name}»؟ الأصناف المرتبطة بها تبقى موجودة بدون مجموعة.</p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete.id)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function GroupForm({ group, onCancel, onSave }) {
+  const [form, setForm] = useState(group);
+  return (
+    <div className="form-grid">
+      <Field label="اسم المجموعة">
+        <input
+          autoFocus className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+          placeholder="مثال: بلاستيك، صحون، ورقيات"
+        />
+      </Field>
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  ACCOUNT / PASSWORD MODAL (site owner)                             */
+/* ------------------------------------------------------------------ */
+
+function ChangeOwnerPasswordModal({ currentPassword, currentRecoveryQuestion, currentRecoveryAnswer, onSave, onClose, notify }) {
+  const [oldPass, setOldPass] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [newPass2, setNewPass2] = useState("");
+  const [recoveryQuestion, setRecoveryQuestion] = useState(currentRecoveryQuestion || "");
+  const [recoveryAnswer, setRecoveryAnswer] = useState(currentRecoveryAnswer || "");
+
+  const submit = () => {
+    if (oldPass !== currentPassword) { notify("كلمة المرور الحالية غير صحيحة", "error"); return; }
+    if (!newPass.trim() || newPass.length < 4) { notify("كلمة المرور الجديدة قصيرة جداً", "error"); return; }
+    if (newPass !== newPass2) { notify("كلمتا المرور الجديدتان غير متطابقتين", "error"); return; }
+    if ((recoveryQuestion.trim() && !recoveryAnswer.trim()) || (!recoveryQuestion.trim() && recoveryAnswer.trim())) {
+      notify("لاستخدام استرداد كلمة المرور، أدخل السؤال والإجابة معاً", "error");
+      return;
+    }
+    onSave({ password: newPass, recoveryQuestion: recoveryQuestion.trim(), recoveryAnswer: recoveryAnswer.trim() });
+    onClose();
+  };
+
+  return (
+    <Modal title="تغيير كلمة مرور رئيس الموقع" onClose={onClose}>
+      <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+        <Field label="كلمة المرور الحالية">
+          <input type="password" className="input" value={oldPass} onChange={(e) => setOldPass(e.target.value)} />
+        </Field>
+        <Field label="كلمة المرور الجديدة">
+          <input type="password" className="input" value={newPass} onChange={(e) => setNewPass(e.target.value)} />
+        </Field>
+        <Field label="تأكيد كلمة المرور الجديدة">
+          <input type="password" className="input" value={newPass2} onChange={(e) => setNewPass2(e.target.value)} />
+        </Field>
+        <div className="modal-section-divider">استرداد كلمة المرور (اختياري)</div>
+        <Field label="سؤال استرداد — يُستخدم لو نسيت كلمة المرور لاحقاً">
+          <input className="input" value={recoveryQuestion} onChange={(e) => setRecoveryQuestion(e.target.value)} placeholder="مثال: ما اسم أول موقع عملت فيه؟" />
+        </Field>
+        <Field label="الإجابة">
+          <input className="input" value={recoveryAnswer} onChange={(e) => setRecoveryAnswer(e.target.value)} placeholder="إجابتك" />
+        </Field>
+        <div className="modal-actions">
+          <button className="btn-ghost" onClick={onClose}>إلغاء</button>
+          <button className="btn-primary" onClick={submit}><Check size={15} /> حفظ</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function AuditPage({ log }) {
+  const rows = log.map((e) => ({ time: new Date(e.time).toLocaleString("ar-SA"), event: e.msg }));
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="تدقيق" title="سجل النشاط" subtitle="آخر العمليات التي جرت في هذه الجلسة على هذا الجهاز"
+        action={log.length > 0 && <button className="btn-ghost" onClick={() => downloadCSV("سجل_النشاط.csv", rows, ["time", "event"])}><Download size={15} /> تصدير CSV</button>}
+      />
       <div className="panel">
         {log.length === 0 ? (
           <EmptyState icon={Clock} title="لا يوجد نشاط مسجّل بعد" hint="سيظهر هنا كل إضافة أو تعديل أو حذف تقوم به" />
@@ -1633,72 +2175,150 @@ function AuditPage({ log }) {
   );
 }
 
-const ADMIN_PASSWORD = "admin";
 const ROLE_KEY = "warehouse-role";
 
-function LoginGate({ onEnter }) {
-  const [mode, setMode] = useState(null); // null | 'admin'
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+// نافذة استرداد كلمة المرور — تظهر داخل نافذة الدخول للتحكم
+function ForgotPasswordPanel({ mode, data, onClose }) {
+  const [answer, setAnswer] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const [err, setErr] = useState("");
+  const hasQuestion = mode === "owner" && !!(data?.ownerRecoveryQuestion || "").trim();
 
-  const submitAdmin = (e) => {
+  const checkAnswer = (e) => {
     e.preventDefault();
-    if (password === ADMIN_PASSWORD) {
+    const correct = (data?.ownerRecoveryAnswer || "").trim().toLowerCase();
+    if (answer.trim().toLowerCase() === correct && correct !== "") {
+      setRevealed(true);
+      setErr("");
+    } else {
+      setErr("الإجابة غير صحيحة");
+    }
+  };
+
+  return (
+    <Modal title="نسيت كلمة المرور؟" onClose={onClose}>
+      {mode === "user" ? (
+        <p className="confirm-text">
+          كلمات مرور المستخدمين يديرها رئيس الموقع من صفحة «المستخدمون» — تواصل معه لإعادة تعيين كلمة مرورك.
+        </p>
+      ) : !hasQuestion ? (
+        <p className="confirm-text">
+          لم يتم إعداد سؤال استرداد لكلمة مرور رئيس الموقع بعد. يمكنك إعداده لاحقاً من «تغيير كلمة المرور»
+          بعد الدخول. كلمة المرور الافتراضية عند أول تشغيل للموقع هي <strong>admin</strong> إن لم تُغيَّر بعد.
+        </p>
+      ) : revealed ? (
+        <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+          <p className="confirm-text">كلمة مرور رئيس الموقع الحالية هي:</p>
+          <div className="recovered-pass">{data.ownerPassword}</div>
+          <p className="confirm-text" style={{ fontSize: 12.5 }}>يُفضّل تغييرها فور الدخول من «تغيير كلمة المرور».</p>
+        </div>
+      ) : (
+        <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={checkAnswer}>
+          <Field label={data.ownerRecoveryQuestion}>
+            <input autoFocus className="input" value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="إجابتك" />
+          </Field>
+          {err && <div className="alert alert-error"><AlertTriangle size={15} /> {err}</div>}
+          <div className="modal-actions">
+            <button type="button" className="btn-ghost" onClick={onClose}>إلغاء</button>
+            <button type="submit" className="btn-primary"><Check size={15} /> تحقّق</button>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
+// نافذة "الدخول للتحكم" — تظهر عند طلب المستخدم الانتقال من وضع العرض
+// إلى وضع التحكم والتعديل (مستخدم أو رئيس الموقع)، محمية بكلمة مرور
+function ControlLoginModal({ onEnter, onClose, data }) {
+  const [mode, setMode] = useState(null); // null | 'owner' | 'user'
+  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState("");
+  const [error, setError] = useState("");
+  const [showForgot, setShowForgot] = useState(false);
+
+  const submitOwner = (e) => {
+    e.preventDefault();
+    if (!data) return;
+    if (password === data.ownerPassword) {
       setError("");
-      onEnter("admin");
+      onEnter({ type: "owner" });
     } else {
       setError("كلمة المرور غير صحيحة");
     }
   };
 
-  return (
-    <div className="login-screen">
-      <FontStyles />
-      <div className="login-card">
-        <div className="brand-mark login-mark">
-          <Boxes size={24} strokeWidth={2.2} />
-        </div>
-        <div className="login-title">سجلّ المستودع</div>
-        <div className="login-sub">اختر طريقة الدخول للمتابعة</div>
+  const submitUser = (e) => {
+    e.preventDefault();
+    if (!data) return;
+    const u = data.users.find((x) => x.username === username.trim());
+    if (!u || u.password !== password) {
+      setError("اسم المستخدم أو كلمة المرور غير صحيحة");
+      return;
+    }
+    if (isTempExpired(u)) {
+      setError("انتهت صلاحية كلمة المرور المؤقتة — تواصل مع رئيس الموقع لتجديدها");
+      return;
+    }
+    setError("");
+    onEnter({ type: "user", userId: u.id });
+  };
 
-        {mode !== "admin" ? (
-          <div className="login-choices">
-            <button className="login-choice" onClick={() => onEnter("guest")}>
-              <div className="login-choice-icon"><Search size={18} /></div>
-              <div className="login-choice-text">
-                <div className="login-choice-title">الدخول كزائر</div>
-                <div className="login-choice-hint">تصفّح كل البيانات دون إمكانية التعديل</div>
-              </div>
-            </button>
-            <button className="login-choice" onClick={() => { setMode("admin"); setError(""); setPassword(""); }}>
-              <div className="login-choice-icon"><ShieldAlert size={18} /></div>
-              <div className="login-choice-text">
-                <div className="login-choice-title">الدخول كمسؤول</div>
-                <div className="login-choice-hint">التحكم الكامل: إضافة وتعديل وحذف</div>
-              </div>
-            </button>
-          </div>
-        ) : (
-          <form className="login-admin-form" onSubmit={submitAdmin}>
-            <Field label="كلمة مرور المسؤول">
-              <input
-                autoFocus
-                type="password"
-                className="input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="أدخل كلمة المرور"
-              />
-            </Field>
-            {error && <div className="alert alert-error"><AlertTriangle size={15} /> {error}</div>}
-            <div className="login-admin-actions">
-              <button type="button" className="btn-ghost" onClick={() => { setMode(null); setError(""); }}>رجوع</button>
-              <button type="submit" className="btn-primary"><Check size={15} /> دخول</button>
+  return (
+    <Modal title="الدخول لوضع التحكم" onClose={onClose}>
+      {!data ? (
+        <div className="login-sub">جارٍ التحضير…</div>
+      ) : mode === null ? (
+        <div className="login-choices">
+          <button className="login-choice" onClick={() => { setMode("user"); setError(""); setUsername(""); setPassword(""); }}>
+            <div className="login-choice-icon"><Users size={18} /></div>
+            <div className="login-choice-text">
+              <div className="login-choice-title">دخول مستخدم</div>
+              <div className="login-choice-hint">حساب باسم مستخدم وكلمة مرور، بصلاحية محددة</div>
             </div>
-          </form>
-        )}
-      </div>
-    </div>
+          </button>
+          <button className="login-choice" onClick={() => { setMode("owner"); setError(""); setPassword(""); }}>
+            <div className="login-choice-icon"><ShieldAlert size={18} /></div>
+            <div className="login-choice-text">
+              <div className="login-choice-title">رئيس الموقع</div>
+              <div className="login-choice-hint">تحكم كامل بالموقع + إدارة المستخدمين والمجموعات</div>
+            </div>
+          </button>
+        </div>
+      ) : mode === "owner" ? (
+        <form className="login-admin-form" onSubmit={submitOwner}>
+          <Field label="كلمة مرور رئيس الموقع">
+            <input
+              autoFocus type="password" className="input"
+              value={password} onChange={(e) => setPassword(e.target.value)}
+              placeholder="أدخل كلمة المرور"
+            />
+          </Field>
+          {error && <div className="alert alert-error"><AlertTriangle size={15} /> {error}</div>}
+          <button type="button" className="link-btn" onClick={() => setShowForgot(true)}>نسيت كلمة المرور؟</button>
+          <div className="login-admin-actions">
+            <button type="button" className="btn-ghost" onClick={() => { setMode(null); setError(""); }}>رجوع</button>
+            <button type="submit" className="btn-primary"><Check size={15} /> دخول</button>
+          </div>
+        </form>
+      ) : (
+        <form className="login-admin-form" onSubmit={submitUser}>
+          <Field label="اسم المستخدم">
+            <input autoFocus className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="اسم المستخدم" />
+          </Field>
+          <Field label="كلمة المرور">
+            <input type="password" className="input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="كلمة المرور" />
+          </Field>
+          {error && <div className="alert alert-error"><AlertTriangle size={15} /> {error}</div>}
+          <button type="button" className="link-btn" onClick={() => setShowForgot(true)}>نسيت كلمة المرور؟</button>
+          <div className="login-admin-actions">
+            <button type="button" className="btn-ghost" onClick={() => { setMode(null); setError(""); }}>رجوع</button>
+            <button type="submit" className="btn-primary"><Check size={15} /> دخول</button>
+          </div>
+        </form>
+      )}
+      {showForgot && <ForgotPasswordPanel mode={mode || "owner"} data={data} onClose={() => setShowForgot(false)} />}
+    </Modal>
   );
 }
 
@@ -1706,8 +2326,14 @@ function App() {
   const [page, setPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
   const [navOpen, setNavOpen] = useState(false);
-  const [role, setRole] = useState(() => {
-    try { return sessionStorage.getItem(ROLE_KEY) || null; } catch (e) { return null; }
+  const [showPwModal, setShowPwModal] = useState(false);
+  const [showControlLogin, setShowControlLogin] = useState(false);
+  const [printJob, setPrintJob] = useState(null); // { type: 'dashboard'|'inventory'|'items' } | null
+  const [session, setSession] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem(ROLE_KEY);
+      return raw ? JSON.parse(raw) : { type: "guest" };
+    } catch (e) { return { type: "guest" }; }
   });
 
   const [auditLog, setAuditLog] = useState([]);
@@ -1729,20 +2355,31 @@ function App() {
 
   const inventory = useMemo(() => (data ? computeInventory(data) : []), [data]);
 
-  const enter = (r) => {
-    setRole(r);
-    try { sessionStorage.setItem(ROLE_KEY, r); } catch (e) {}
+  const enter = (s) => {
+    setSession(s);
+    try { sessionStorage.setItem(ROLE_KEY, JSON.stringify(s)); } catch (e) {}
   };
 
+  // تسجيل الخروج من وضع التحكم يعيدك دائماً إلى وضع العرض الافتراضي، وليس لشاشة اختيار فارغة
   const logout = () => {
-    setRole(null);
+    setSession({ type: "guest" });
     setPage("dashboard");
     try { sessionStorage.removeItem(ROLE_KEY); } catch (e) {}
   };
 
-  if (!role) {
-    return <LoginGate onEnter={enter} />;
-  }
+  // تجهيز تقرير قابل للطباعة/PDF بتصميم مستند مرتّب، ثم فتح نافذة الطباعة
+  const triggerPrint = (type) => setPrintJob({ type });
+  useEffect(() => {
+    if (!printJob) {
+      document.body.classList.remove("printing-report");
+      return;
+    }
+    document.body.classList.add("printing-report");
+    const t = setTimeout(() => window.print(), 60);
+    const after = () => setPrintJob(null);
+    window.addEventListener("afterprint", after);
+    return () => { clearTimeout(t); window.removeEventListener("afterprint", after); };
+  }, [printJob]);
 
   if (!data) {
     return (
@@ -1754,11 +2391,84 @@ function App() {
     );
   }
 
-  const readOnly = role === "guest";
-  const GUEST_PAGES = ["dashboard", "inventory"];
-  const visibleNav = readOnly ? NAV.filter((n) => GUEST_PAGES.includes(n.key)) : NAV;
-  const safePage = readOnly && !GUEST_PAGES.includes(page) ? "dashboard" : page;
-  const go = (p) => { setPage(readOnly && !GUEST_PAGES.includes(p) ? "dashboard" : p); setNavOpen(false); };
+  const isOwner = session.type === "owner";
+  const isGuest = session.type !== "owner" && session.type !== "user";
+  const currentUser = session.type === "user" ? data.users.find((u) => u.id === session.userId) : null;
+
+  // مستخدم مؤقت انتهت صلاحيته أو حُذف حسابه — إخراج فوري
+  if (session.type === "user" && (!currentUser || isTempExpired(currentUser))) {
+    setTimeout(() => {
+      logout();
+      notify("انتهت صلاحية الدخول — تواصل مع رئيس الموقع", "error");
+    }, 0);
+    return (
+      <div className="boot-screen">
+        <FontStyles />
+        <div className="boot-mark">⏳</div>
+        <div>جارٍ تسجيل الخروج…</div>
+      </div>
+    );
+  }
+
+  /* ---------------- وضع العرض (الافتراضي التلقائي) ----------------
+     واجهة مبسّطة جداً: المخزون فقط للقراءة، بدون لوحة تحكم ولا قوائم جانبية،
+     مع زر واحد للانتقال لوضع التحكم والتعديل (محمي بكلمة مرور). */
+  if (isGuest) {
+    return (
+      <div className="view-shell">
+        <FontStyles />
+        <header className="view-topbar">
+          <div className="brand">
+            <div className="brand-mark">
+              <Boxes size={20} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="brand-title">سجلّ المستودع</div>
+              <div className="brand-sub">لوحة العرض</div>
+            </div>
+          </div>
+          <span
+            className={`conn-dot ${sync.online ? "conn-dot-on" : "conn-dot-off"}`}
+            title={sync.online ? "متصل — البيانات محدّثة" : "غير متصل — سيتم التحديث عند عودة الاتصال"}
+          />
+          <button className="btn-ghost view-control-btn" onClick={() => setShowControlLogin(true)}>
+            <KeyRound size={14} /> <span>الدخول للتحكم</span>
+          </button>
+        </header>
+
+        <main className="view-main">
+          <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} />
+        </main>
+
+        {showControlLogin && (
+          <ControlLoginModal
+            data={data}
+            onClose={() => setShowControlLogin(false)}
+            onEnter={(s) => { enter(s); setShowControlLogin(false); notify("تم الدخول بنجاح"); }}
+          />
+        )}
+
+        <Toast toast={toast} />
+        <PrintableReport job={printJob} data={data} inventory={inventory} />
+      </div>
+    );
+  }
+
+  // كل مستخدم مسجّل دخول (رئيس الموقع أو مستخدم) يشوف كل صفحات التشغيل؛
+  // الفرق فقط: هل يقدر يعدّل (readOnly) وهل يشوف صفحتي المستخدمين/المجموعات (owner فقط)
+  const readOnly = currentUser ? !currentUser.canEdit : false;
+  const allowedKeys = NAV.filter((n) => !n.ownerOnly).map((n) => n.key);
+  const visibleNav = NAV.filter((n) => (n.ownerOnly ? isOwner : allowedKeys.includes(n.key)));
+  const safePage = allowedKeys.includes(page) || (n2ok(page)) ? page : (allowedKeys[0] || "dashboard");
+  function n2ok(p) { return (p === "users" || p === "groups") && isOwner; }
+  const go = (p) => {
+    const ok = n2ok(p) || allowedKeys.includes(p);
+    setPage(ok ? p : (allowedKeys[0] || "dashboard"));
+    setNavOpen(false);
+  };
+
+  const roleLabel = isOwner ? "رئيس الموقع — تحكم كامل"
+    : `${currentUser?.username}${readOnly ? " (قراءة فقط)" : " (يقدر يعدّل)"}`;
 
   return (
     <div className="app-shell">
@@ -1774,9 +2484,9 @@ function App() {
           </div>
         </div>
 
-        <div className={`role-badge ${readOnly ? "role-badge-guest" : "role-badge-admin"}`}>
-          {readOnly ? <Search size={13} /> : <ShieldAlert size={13} />}
-          {readOnly ? "وضع الزائر — للقراءة فقط" : "وضع المسؤول — تحكم كامل"}
+        <div className={`role-badge role-badge-admin`}>
+          {isOwner ? <ShieldAlert size={13} /> : <Users size={13} />}
+          {roleLabel}
         </div>
 
         <nav className="nav-list">
@@ -1790,12 +2500,11 @@ function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <div className={`save-indicator ${saving ? "save-active" : ""}`}>
-            <span className="save-dot" /> {saving ? "جارٍ الحفظ…" : "محفوظ تلقائياً"}
-          </div>
-          <div className={`sync-indicator ${sync.online ? "" : "sync-offline"}`}>
-            <span className="save-dot" /> {sync.online ? "محفوظ على هذا الجهاز" : "غير متصل"}
-          </div>
+          {isOwner && (
+            <button className="logout-btn" onClick={() => setShowPwModal(true)}>
+              <KeyRound size={14} /> تغيير كلمة المرور
+            </button>
+          )}
           <button className="logout-btn" onClick={logout}>
             <X size={14} /> تسجيل الخروج
           </button>
@@ -1807,17 +2516,23 @@ function App() {
           <button className="hamburger" onClick={() => setNavOpen((v) => !v)} aria-label="القائمة">
             <span /><span /><span />
           </button>
+          <span
+            className={`conn-dot ${sync.online ? "conn-dot-on" : "conn-dot-off"}`}
+            title={sync.online ? (saving ? "جارٍ الحفظ…" : "متصل — يُحفظ تلقائياً") : "غير متصل — سيتم الحفظ عند عودة الاتصال"}
+          />
           <GlobalSearch data={data} inventory={inventory} go={go} />
         </header>
 
         <main className="main-area">
-          {safePage === "dashboard" && <Dashboard inventory={inventory} data={data} go={go} readOnly={readOnly} />}
-          {safePage === "items" && <ItemsPage data={data} setData={setData} notify={notify} readOnly={readOnly} />}
+          {safePage === "dashboard" && <Dashboard inventory={inventory} data={data} go={go} readOnly={readOnly} onPrint={() => triggerPrint("dashboard")} />}
+          {safePage === "items" && <ItemsPage data={data} setData={setData} notify={notify} readOnly={readOnly} onPrint={() => triggerPrint("items")} />}
           {safePage === "incoming" && <MovementPage kind="in" data={data} setData={setData} notify={notify} readOnly={readOnly} />}
           {safePage === "outgoing" && <MovementPage kind="out" data={data} setData={setData} notify={notify} readOnly={readOnly} />}
-          {safePage === "inventory" && <InventoryPage inventory={inventory} />}
+          {safePage === "inventory" && <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} />}
           {safePage === "barcodes" && <BarcodesPage data={data} setData={setData} notify={notify} readOnly={readOnly} />}
           {safePage === "audit" && <AuditPage log={auditLog} />}
+          {safePage === "users" && isOwner && <UsersPage data={data} setData={setData} notify={notify} />}
+          {safePage === "groups" && isOwner && <GroupsPage data={data} setData={setData} notify={notify} />}
         </main>
       </div>
 
@@ -1830,7 +2545,134 @@ function App() {
         ))}
       </nav>
 
+      {showPwModal && (
+        <ChangeOwnerPasswordModal
+          currentPassword={data.ownerPassword}
+          currentRecoveryQuestion={data.ownerRecoveryQuestion}
+          currentRecoveryAnswer={data.ownerRecoveryAnswer}
+          notify={notify}
+          onClose={() => setShowPwModal(false)}
+          onSave={({ password, recoveryQuestion, recoveryAnswer }) => {
+            setData({ ...data, ownerPassword: password, ownerRecoveryQuestion: recoveryQuestion, ownerRecoveryAnswer: recoveryAnswer });
+            notify("تم تغيير كلمة مرور رئيس الموقع");
+          }}
+        />
+      )}
+
       <Toast toast={toast} />
+      <PrintableReport job={printJob} data={data} inventory={inventory} />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  PRINTABLE REPORT — تصميم مستند مرتّب للتصدير كـ PDF/طباعة           */
+/*  (بديل عن طباعة الموقع كما هو، يظهر فقط أثناء الطباعة)              */
+/* ------------------------------------------------------------------ */
+
+function PrintableReport({ job, data, inventory }) {
+  if (!job || !data) return null;
+  const type = job.type;
+  const now = new Date();
+  let generatedAt;
+  try {
+    generatedAt = new Intl.DateTimeFormat("ar-SA-u-nu-latn", { dateStyle: "long", timeStyle: "short" }).format(now);
+  } catch {
+    generatedAt = now.toLocaleString();
+  }
+
+  const groupName = (id) => data.itemGroups.find((g) => g.id === id)?.name || "بدون مجموعة";
+
+  const TITLES = {
+    dashboard: "تقرير ملخص المستودع",
+    inventory: "تقرير المخزون",
+    items: "تقرير قائمة الأغراض",
+  };
+
+  const total = inventory.length;
+  const available = inventory.filter((i) => i.status === "available").length;
+  const low = inventory.filter((i) => i.status === "low").length;
+  const empty = inventory.filter((i) => i.status === "empty").length;
+
+  return (
+    <div className="print-report">
+      <div className="print-report-header">
+        <div className="print-report-brand">
+          <div className="print-report-brand-mark">📦</div>
+          <div>
+            <div className="print-report-brand-title">سجلّ المستودع</div>
+            <div className="print-report-brand-sub">Warehouse Manifest</div>
+          </div>
+        </div>
+        <div className="print-report-meta">
+          <div className="print-report-doc-title">{TITLES[type] || "تقرير"}</div>
+          <div>تاريخ الإصدار: {generatedAt}</div>
+        </div>
+      </div>
+
+      {type === "dashboard" && (
+        <>
+          <div className="print-stat-row">
+            <div className="print-stat"><span>{total}</span>إجمالي الأصناف</div>
+            <div className="print-stat"><span>{available}</span>متوفرة</div>
+            <div className="print-stat"><span>{low}</span>مخزون منخفض</div>
+            <div className="print-stat"><span>{empty}</span>نفدت كمياتها</div>
+          </div>
+          <table className="print-table">
+            <thead><tr><th>الكود</th><th>الصنف</th><th>المجموعة</th><th>الموقع</th><th>الكمية</th><th>الحالة</th></tr></thead>
+            <tbody>
+              {inventory.map((i) => (
+                <tr key={i.code}>
+                  <td>{i.code}</td>
+                  <td>{i.name}</td>
+                  <td>{groupName(i.group)}</td>
+                  <td>{i.category || "—"}</td>
+                  <td>{i.balance}</td>
+                  <td>{STATUS_META[i.status]?.label}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {type === "inventory" && (
+        <table className="print-table">
+          <thead><tr><th>الكود</th><th>الصنف</th><th>المجموعة</th><th>الموقع</th><th>الداخل</th><th>الخارج</th><th>الكمية</th><th>الحالة</th></tr></thead>
+          <tbody>
+            {inventory.map((i) => (
+              <tr key={i.code}>
+                <td>{i.code}</td>
+                <td>{i.name}</td>
+                <td>{groupName(i.group)}</td>
+                <td>{i.category || "—"}</td>
+                <td>{i.inQty}</td>
+                <td>{i.outQty}</td>
+                <td>{i.balance}</td>
+                <td>{STATUS_META[i.status]?.label}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {type === "items" && (
+        <table className="print-table">
+          <thead><tr><th>الكود</th><th>اسم الغرض</th><th>الفئة / الموقع</th><th>ملاحظات</th></tr></thead>
+          <tbody>
+            {data.items.map((it) => (
+              <tr key={it.code}>
+                <td>{it.code}</td>
+                <td>{it.name}</td>
+                <td>{it.category || "—"}</td>
+                <td>{it.notes || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="print-report-footer">سجلّ المستودع — مستند تم إنشاؤه تلقائياً بتاريخ {generatedAt}</div>
     </div>
   );
 }
@@ -1922,12 +2764,10 @@ function FontStyles() {
       .nav-item-active .nav-index { color: rgba(243,238,221,0.55); }
 
       .sidebar-foot { margin-top: auto; padding: 0 4px; }
-      .save-indicator { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-soft); font-family: 'JetBrains Mono', monospace; }
       .save-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
-      .save-active .save-dot { background: var(--amber); animation: pulse 1s infinite ease-in-out; }
+      .conn-dot { width: 9px; height: 9px; min-width: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); cursor: default; }
+      .conn-dot-off { background: var(--red); box-shadow: 0 0 0 3px var(--red-bg, rgba(178,58,46,0.12)); animation: pulse 1.2s infinite ease-in-out; }
       @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-      .sync-indicator { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-soft); font-family: 'JetBrains Mono', monospace; margin-top: 6px; }
-      .sync-offline .save-dot { background: var(--red); }
 
       /* ---------- MAIN ---------- */
       .main-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -2115,6 +2955,10 @@ function FontStyles() {
       .modal-title { font-family: 'Almarai'; font-weight: 800; font-size: 14.5px; }
       .modal-body { padding: 18px; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; grid-column: 1 / -1; }
+      .modal-section-divider {
+        grid-column: 1 / -1; font-size: 11.5px; font-weight: 700; color: var(--ink-soft);
+        border-top: 1px dashed var(--line); padding-top: 12px; margin-top: 4px;
+      }
       .confirm-text { font-size: 13px; color: var(--ink); line-height: 1.7; margin: 0; }
 
       /* ---------- EMPTY STATE ---------- */
@@ -2173,6 +3017,31 @@ function FontStyles() {
       .login-choice-hint { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
       .login-admin-form { display: flex; flex-direction: column; gap: 4px; text-align: right; }
       .login-admin-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 16px; }
+      .link-btn {
+        background: none; border: none; padding: 0; margin-top: 8px; text-align: right;
+        color: var(--navy); font-family: 'Tajawal'; font-size: 12px; font-weight: 700;
+        text-decoration: underline; cursor: pointer; align-self: flex-start;
+      }
+      .recovered-pass {
+        font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 700;
+        background: var(--kraft); border: 1px dashed var(--line); border-radius: 10px;
+        padding: 10px; text-align: center; letter-spacing: 0.04em;
+      }
+
+      /* ---------- VIEW MODE (لوحة العرض) — واجهة مبسّطة للزوار ---------- */
+      .view-shell { min-height: 100vh; display: flex; flex-direction: column; background: var(--paper); }
+      .view-topbar {
+        display: flex; align-items: center; gap: 12px; padding: 14px 20px;
+        border-bottom: 1px dashed var(--line); background: var(--paper); position: sticky; top: 0; z-index: 5;
+      }
+      .view-topbar .brand { display: flex; align-items: center; gap: 10px; flex: 1; }
+      .view-control-btn { white-space: nowrap; }
+      .view-main { flex: 1; padding: 20px 24px 40px; }
+      @media (max-width: 520px) {
+        .view-topbar { padding: 12px 14px; }
+        .view-main { padding: 16px 14px 60px; }
+        .view-control-btn span { display: none; }
+      }
 
       /* ---------- ROLE BADGE ---------- */
       .role-badge {
@@ -2195,6 +3064,7 @@ function FontStyles() {
       }
       .alert-banner-text { flex: 1; line-height: 1.7; }
       .alert-banner-btn { flex-shrink: 0; }
+      .alert-banner-expiry { background: var(--red-bg); color: var(--red); border-color: var(--red); }
 
       /* ---------- CHARTS ---------- */
       .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
@@ -2205,10 +3075,30 @@ function FontStyles() {
       .mini-chart-bar { background: var(--navy); height: 100%; border-radius: 6px; transition: width 0.3s ease; }
       .mini-chart-bar-amber { background: var(--amber); }
       .mini-chart-val { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; text-align: left; }
+      .mini-chart-pct { color: var(--ink-soft); font-size: 10.5px; }
 
       /* ---------- INVENTORY GRID CARDS ---------- */
       .location-select { max-width: 180px; }
       .view-toggle { display: flex; gap: 4px; }
+      .page-check-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+      .page-check-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+
+      /* ---------- EMOJI PICKER ---------- */
+      .emoji-picker-wrap { position: relative; }
+      .emoji-trigger {
+        display: flex; align-items: center; gap: 8px; width: 100%; background: #fff; border: 1px solid var(--line);
+        border-radius: 8px; padding: 9px 12px; font-family: 'Tajawal'; font-size: 13px; color: var(--ink); cursor: pointer;
+      }
+      .emoji-trigger-glyph { font-size: 18px; }
+      .emoji-popover {
+        position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; left: 0; background: #fff; border: 1px solid var(--line);
+        border-radius: 10px; padding: 10px; box-shadow: 0 10px 28px rgba(35,48,58,0.18);
+      }
+      .emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin-bottom: 8px; }
+      .emoji-cell { font-size: 18px; background: none; border: 1px solid transparent; border-radius: 6px; padding: 4px; cursor: pointer; }
+      .emoji-cell:hover { background: var(--kraft); }
+      .emoji-cell-active { border-color: var(--navy); background: var(--kraft); }
+      .emoji-custom-row { display: flex; gap: 6px; }
       .inv-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; padding: 14px; }
       .inv-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 13px; display: flex; flex-direction: column; gap: 6px; }
       .inv-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
@@ -2231,6 +3121,40 @@ function FontStyles() {
         .panel, .ledger-table, .barcode-grid { box-shadow: none !important; border: 1px solid #999 !important; }
         .page { padding: 0 !important; }
       }
+
+      /* ---------- تقرير الطباعة/PDF (تصميم مستند مستقل عن واجهة الموقع) ---------- */
+      .print-report { display: none; }
+      body.printing-report .app-shell,
+      body.printing-report .view-shell,
+      body.printing-report .toast { display: none !important; }
+      @media print {
+        body.printing-report .print-report {
+          display: block !important; background: #fff; color: #23303A;
+          font-family: 'Tajawal', sans-serif; padding: 10mm 6mm; direction: rtl;
+        }
+      }
+      .print-report-header {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        border-bottom: 2px solid #23303A; padding-bottom: 10px; margin-bottom: 16px;
+      }
+      .print-report-brand { display: flex; align-items: center; gap: 10px; }
+      .print-report-brand-mark { font-size: 26px; }
+      .print-report-brand-title { font-family: 'Almarai'; font-weight: 800; font-size: 16px; }
+      .print-report-brand-sub { font-size: 10.5px; color: #5B6570; }
+      .print-report-meta { text-align: left; font-size: 11px; color: #5B6570; }
+      .print-report-doc-title { font-family: 'Almarai'; font-weight: 800; font-size: 14px; color: #23303A; margin-bottom: 3px; }
+      .print-stat-row { display: flex; gap: 10px; margin-bottom: 18px; }
+      .print-stat {
+        flex: 1; border: 1px solid #C9BA96; border-radius: 8px; padding: 10px;
+        text-align: center; font-size: 11px; color: #5B6570;
+      }
+      .print-stat span { display: block; font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: #23303A; margin-bottom: 2px; }
+      .print-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      .print-table th, .print-table td { border: 1px solid #999; padding: 5px 7px; text-align: right; }
+      .print-table th { background: #ECE2CC; font-weight: 700; }
+      .print-table tr { break-inside: avoid; }
+      .print-report-footer { margin-top: 18px; padding-top: 8px; border-top: 1px dashed #C9BA96; font-size: 10px; color: #5B6570; text-align: center; }
+      @page { margin: 12mm; }
 
       /* ---------- RESPONSIVE ---------- */
       @media (max-width: 860px) {
