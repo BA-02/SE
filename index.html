@@ -2816,6 +2816,25 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [navOpen]);
+
+  // اكتشاف الجوال عبر JS مباشرة (وليس فقط عبر @media) — بعض متصفحات
+  // الأندرويد (خصوصاً متصفحات هواوي/الشركات الصينية عند فتح الملف مباشرة
+  // بدون سيرفر) لا تُطبّق meta viewport بشكل صحيح فتفشل @media في العمل،
+  // فيبقى الشريط الجانبي ظاهراً بعرضه الكامل وتخرج البطاقات عن الشاشة.
+  // هذا احتياط إضافي يجبر وضع الجوال بناءً على العرض الفعلي للنافذة.
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 860
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 860);
+    onResize();
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+    };
+  }, []);
   const [session, setSession] = useState(() => {
     try {
       const raw = sessionStorage.getItem(ROLE_KEY);
@@ -3013,7 +3032,7 @@ function App() {
     : `${currentUser?.username}${readOnly ? " (قراءة فقط)" : " (يقدر يعدّل)"}`;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isMobile ? "is-mobile" : ""}`}>
       <FontStyles />
       {navOpen && <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />}
       <aside className={`sidebar ${navOpen ? "sidebar-open" : ""}`}>
@@ -3056,9 +3075,11 @@ function App() {
 
       <div className="main-col">
         <header className="topbar">
-          <button className="hamburger" onClick={() => setNavOpen((v) => !v)} aria-label="القائمة">
-            <span /><span /><span />
-          </button>
+          {isMobile && (
+            <button className="hamburger hamburger-force" onClick={() => setNavOpen((v) => !v)} aria-label="القائمة">
+              <span /><span /><span />
+            </button>
+          )}
           <span
             className={`conn-dot ${sync.online ? "conn-dot-on" : "conn-dot-off"}`}
             title={sync.online ? (saving ? "جارٍ الحفظ…" : "متصل — يُحفظ تلقائياً") : "غير متصل — سيتم الحفظ عند عودة الاتصال"}
@@ -3305,6 +3326,33 @@ function FontStyles() {
       }
 
       * { box-sizing: border-box; }
+
+      /* حماية من خروج أي عنصر عن عرض الشاشة بالجوال (كروت، جداول، إلخ) */
+      html, body { max-width: 100%; overflow-x: hidden; }
+
+      /* ---------- نسخة احتياطية من قواعد الجوال، مبنية على كلاس JS
+         (.is-mobile) بدل الاعتماد فقط على @media. بعض متصفحات الأندرويد
+         (مثل متصفح هواوي عند فتح الملف مباشرة بدون سيرفر) لا تُفعّل
+         meta viewport بشكل صحيح فتفشل @media، فيبقى الشريط الجانبي
+         ظاهراً بعرضه الكامل ويغطي الواجهة. هذه القواعد تضمن نفس السلوك
+         دائماً لأنها تعتمد على عرض النافذة الفعلي المحسوب بالجافاسكربت. */
+      .app-shell.is-mobile .sidebar {
+        position: fixed !important; top: 0; bottom: 0; right: 0; z-index: 70;
+        width: min(78vw, 300px) !important;
+        transform: translateX(100%);
+        transition: transform 0.18s ease-out;
+        box-shadow: -8px 0 24px rgba(0,0,0,0.18);
+      }
+      .app-shell.is-mobile .sidebar.sidebar-open { transform: translateX(0); }
+      .app-shell.is-mobile .hamburger-force { display: flex !important; padding: 10px; margin: -10px; touch-action: manipulation; }
+      .app-shell.is-mobile .main-area { padding: 18px 16px 24px !important; }
+      .app-shell.is-mobile .stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+      .app-shell.is-mobile .chart-grid { grid-template-columns: 1fr !important; }
+      .app-shell.is-mobile .form-grid, .app-shell.is-mobile .form-grid-move { grid-template-columns: 1fr 1fr !important; }
+      .app-shell.is-mobile .sidebar-backdrop {
+        display: block !important; position: fixed; inset: 0; z-index: 65;
+        background: rgba(20,26,32,0.4);
+      }
 
       .app-shell, .boot-screen {
         direction: rtl;
