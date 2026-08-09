@@ -126,9 +126,10 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Package, ArrowDownToLine, ArrowUpFromLine, Boxes, Barcode, LayoutGrid,
-  Search, Plus, Trash2, Pencil, X, Check, AlertTriangle, TriangleAlert,
+  Search, Plus, Minus, Trash2, Pencil, X, Check, AlertTriangle, TriangleAlert,
   ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert,
-  Users, KeyRound, Layers, Shuffle, Eye, EyeOff, Bell, RotateCcw, Sun, Moon, Monitor, ClipboardList
+  Users, KeyRound, Layers, Shuffle, Eye, EyeOff, Bell, RotateCcw, Sun, Moon, Monitor, ClipboardList,
+  BarChart3, PieChart, Percent, TrendingUp, ListChecks
 } from "lucide-react";
 import JsBarcode from "https://esm.sh/jsbarcode@3.11.6";
 
@@ -220,9 +221,9 @@ const DEFAULT_ITEM_GROUPS = [
   { id: "grp-cleaning", name: "منظفات" },
 ];
 
-// الفروع/المواقع — تُستخدم لحصر كل صنف بفرع معيّن، وربط منظم بفرع محدد
-// حتى ما يشوف/يعدّل إلا مخزون فرعه (رئيس الموقع يشوف كل الفروع دائماً)
-const DEFAULT_BRANCHES = [{ id: "br-main", name: "الفرع الرئيسي" }];
+// الأقسام/المواقع — تُستخدم لحصر كل صنف بقسم معيّن، وربط منظم بقسم محدد
+// حتى ما يشوف/يعدّل إلا مخزون قسمه (رئيس الموقع يشوف كل الأقسام دائماً)
+const DEFAULT_BRANCHES = [{ id: "br-main", name: "القسم الرئيسي" }];
 
 // اقتراح إيموجي تلقائي حسب اسم مجموعة الصنف — مجرد اقتراح، يقدر المستخدم يغيّره
 const GROUP_EMOJI_HINTS = [
@@ -268,8 +269,18 @@ function fuzzyIncludes(source, query) {
 // يضمن وجود إعدادات الحساب/المستخدمين/المجموعات حتى لو كانت بيانات
 // المستودع قديمة (محفوظة قبل إضافة هذه الميزة) دون المساس ببيانات الجرد
 function withDefaults(d) {
+  const migratedOwners = Array.isArray(d.owners) && d.owners.length
+    ? d.owners
+    : [{
+        id: genId("owner"),
+        name: "رئيس الموقع",
+        password: d.ownerPassword || DEFAULT_OWNER_PASSWORD,
+        recoveryQuestion: d.ownerRecoveryQuestion || "",
+        recoveryAnswer: d.ownerRecoveryAnswer || "",
+      }];
   return {
     ...d,
+    owners: migratedOwners,
     ownerPassword: d.ownerPassword || DEFAULT_OWNER_PASSWORD,
     ownerRecoveryQuestion: d.ownerRecoveryQuestion || "",
     ownerRecoveryAnswer: d.ownerRecoveryAnswer || "",
@@ -602,7 +613,7 @@ function downloadCSV(filename, rows, headers) {
 
 /* ------------------------------------------------------------------ */
 /*  نسخة احتياطية كاملة (JSON) — تشمل كل البيانات (أصناف، حركات،         */
-/*  مستخدمين، مجموعات، فروع، مهام) بخلاف تصدير CSV الذي يغطي جزءاً فقط.  */
+/*  مستخدمين، مجموعات، أقسام، مهام) بخلاف تصدير CSV الذي يغطي جزءاً فقط.  */
 /*  ملاحظة: هذا تصدير يدوي بضغطة زر؛ نسخ احتياطي مجدوَل تلقائياً كل      */
 /*  أسبوع (مثلاً) يحتاج Supabase Edge Function + Cron Job من لوحة        */
 /*  تحكم Supabase مباشرة، لأنه يجب أن يعمل حتى لو الموقع مسكّر.          */
@@ -869,9 +880,9 @@ function ScanCameraButton({ onClick }) {
 }
 
 
-function Field({ label, children }) {
+function Field({ label, children, full }) {
   return (
-    <label className="field">
+    <label className={`field ${full ? "field-full" : ""}`}>
       <span className="field-label">{label}</span>
       {children}
     </label>
@@ -1088,6 +1099,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   const [modal, setModal] = useState(null); // { mode: 'add'|'edit', item }
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+  const [branchFilter, setBranchFilter] = useState("all");
 
   // وضع التسجيل السريع: يخلي المستخدم يسجّل دخول/خروج البضاعة مباشرة من
   // قائمة الأغراض نفسها بضغطة وحدة، بدل ما يروح لصفحة منفصلة
@@ -1129,13 +1141,14 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
     }
   };
 
-  // منظم مقيّد بفرع معيّن يشوف بس أصناف فرعه؛ رئيس الموقع يشوف كل شيء دائماً
+  // منظم مقيّد بقسم معيّن يشوف بس أصناف قسمه؛ رئيس الموقع يشوف كل شيء دائماً
   const myBranch = !isOwner && currentUser?.restrictedBranch;
   const branchItems = myBranch ? data.items.filter((i) => i.branch === myBranch) : data.items;
+  const branchName = (id) => (data.branches || []).find((b) => b.id === id)?.name || "";
 
-  const filtered = branchItems.filter((it) =>
-    fuzzyIncludes(it.name + it.code + it.category, query)
-  );
+  const filtered = branchItems
+    .filter((it) => fuzzyIncludes(it.name + it.code + it.category, query))
+    .filter((it) => branchFilter === "all" || it.branch === branchFilter);
 
   const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
@@ -1217,6 +1230,12 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
             </button>
           </div>
         )}
+        {isOwner && (data.branches || []).length > 0 && (
+          <select className="input location-select" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
+            <option value="all">كل الأقسام</option>
+            {data.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        )}
         <button className="btn-ghost" onClick={() => downloadCSV("قائمة_الاغراض.csv", data.items, ["code", "name", "category", "notes", "minQty"])}>
           <Download size={15} /> تصدير CSV
         </button>
@@ -1280,6 +1299,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                   <th>الكود</th>
                   <th>اسم المنتج</th>
                   <th>الموقع / الفئة</th>
+                  {isOwner && <th>القسم</th>}
                   {quickMode === "off" ? <th>ملاحظات</th> : <th>الرصيد الحالي</th>}
                   {!readOnly && <th></th>}
                 </tr>
@@ -1291,6 +1311,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                     <td><CodeTag code={it.code} /></td>
                     <td className="cell-strong">{it.emoji ? `${it.emoji} ` : ""}{it.name}</td>
                     <td className="cell-muted"><MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}</td>
+                    {isOwner && <td className="cell-muted">{branchName(it.branch) || "—"}</td>}
                     {quickMode === "off" ? (
                       <td className="cell-muted">{it.notes || "—"}</td>
                     ) : (
@@ -1305,13 +1326,31 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                           </div>
                         ) : (
                           <div className={`quick-log-row quick-log-${quickMode}`}>
-                            <input
-                              type="number" min="0" step="1" className="input mono quick-log-qty"
-                              placeholder="الكمية"
-                              value={qtyDrafts[it.code] || ""}
-                              onChange={(e) => setQtyDrafts((d) => ({ ...d, [it.code]: e.target.value }))}
-                              onKeyDown={(e) => { if (e.key === "Enter") logQuick(it); }}
-                            />
+                            <div className="qty-stepper">
+                              <button
+                                type="button" className="qty-stepper-btn" title="إنقاص"
+                                onClick={() => setQtyDrafts((d) => {
+                                  const cur = Number(d[it.code] || 0);
+                                  const next = Math.max(0, cur - 1);
+                                  return { ...d, [it.code]: next ? String(next) : "" };
+                                })}
+                              >
+                                <Minus size={13} />
+                              </button>
+                              <input
+                                type="number" min="0" step="1" className="input mono quick-log-qty"
+                                placeholder="الكمية"
+                                value={qtyDrafts[it.code] || ""}
+                                onChange={(e) => setQtyDrafts((d) => ({ ...d, [it.code]: e.target.value }))}
+                                onKeyDown={(e) => { if (e.key === "Enter") logQuick(it); }}
+                              />
+                              <button
+                                type="button" className="qty-stepper-btn" title="زيادة"
+                                onClick={() => setQtyDrafts((d) => ({ ...d, [it.code]: String(Number(d[it.code] || 0) + 1) }))}
+                              >
+                                <Plus size={13} />
+                              </button>
+                            </div>
                             <button
                               className={`icon-btn quick-log-btn ${quickMode === "in" ? "quick-log-btn-in" : "quick-log-btn-out"}`}
                               title={quickMode === "in" ? "تسجيل دخول" : "تسجيل خروج"}
@@ -1458,9 +1497,9 @@ function ItemForm({ item, itemGroups, branches, onCancel, onSave }) {
       <Field label="الموقع / الفئة">
         <input className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="مثال: الدولاب البني 1" />
       </Field>
-      <Field label="الفرع">
+      <Field label="القسم">
         <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
-          <option value="">بدون فرع محدد</option>
+          <option value="">بدون قسم محدد</option>
           {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
       </Field>
@@ -1494,19 +1533,21 @@ function ItemForm({ item, itemGroups, branches, onCancel, onSave }) {
 /*  INVENTORY PAGE                                                     */
 /* ------------------------------------------------------------------ */
 
-function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner }) {
+function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, isOwner }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
   const [groupFilter, setGroupFilter] = useState("all");
+  const [branchFilter, setBranchFilter] = useState("all");
   const [view, setView] = useState("grid"); // grid | list — البطاقات هي الوضع الافتراضي
   const [sortKey, setSortKey] = useState("name");
   const [sortDir, setSortDir] = useState(1);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
 
   const groupName = (id) => itemGroups.find((g) => g.id === id)?.name || "";
+  const branchName = (id) => (branches || []).find((b) => b.id === id)?.name || "";
 
-  // منظم مقيّد بفرع معيّن يشوف بس مخزون فرعه؛ رئيس الموقع يشوف كل شيء دائماً
+  // منظم مقيّد بقسم معيّن يشوف بس مخزون قسمه؛ رئيس الموقع يشوف كل شيء دائماً
   const myBranch = !isOwner && currentUser?.restrictedBranch;
   const scopedInventory = myBranch ? inventory.filter((i) => i.branch === myBranch) : inventory;
 
@@ -1520,6 +1561,7 @@ function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner })
     .filter((i) => statusFilter === "all" || i.status === statusFilter)
     .filter((i) => locationFilter === "all" || i.category === locationFilter)
     .filter((i) => groupFilter === "all" || i.group === groupFilter)
+    .filter((i) => branchFilter === "all" || i.branch === branchFilter)
     .sort((a, b) => {
       if (sortKey === "daysLeft") {
         const va = a.daysLeft === null || a.daysLeft === undefined ? Infinity : a.daysLeft;
@@ -1544,7 +1586,7 @@ function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner })
 
   return (
     <div className="page">
-      <PageHeader eyebrow="الجرد" title="المخزون" subtitle="الأرصدة الحالية محسوبة تلقائياً من حركات الدخول والخروج" />
+      <PageHeader eyebrow="الجرد" title="المخزون" />
 
       <div className="toolbar">
         <div className="search-box">
@@ -1576,6 +1618,12 @@ function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner })
           <select className="input location-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
             <option value="all">كل المواقع</option>
             {locations.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+          </select>
+        )}
+        {isOwner && (branches || []).length > 0 && (
+          <select className="input location-select" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
+            <option value="all">كل الأقسام</option>
+            {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         )}
         <div className="view-toggle">
@@ -1612,7 +1660,7 @@ function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner })
                   <StampBadge status={i.status} />
                 </div>
                 <CodeTag code={i.code} />
-                <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}{groupName(i.group) ? ` · ${groupName(i.group)}` : ""}</div>
+                <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}{groupName(i.group) ? ` · ${groupName(i.group)}` : ""}{isOwner && branchName(i.branch) ? ` · ${branchName(i.branch)}` : ""}</div>
                 {i.expiry && <ExpiryBadge expiry={i.expiry} daysLeft={i.daysLeft} />}
                 <div className="inv-card-balance">{i.balance} <span className="inv-card-balance-unit">الكمية</span></div>
               </div>
@@ -1626,6 +1674,7 @@ function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner })
                   <SortHeader label="الكود" k="code" />
                   <SortHeader label="اسم المنتج" k="name" />
                   <SortHeader label="الفئة / الموقع" k="category" />
+                  {isOwner && <th>القسم</th>}
                   <SortHeader label="الداخل" k="inQty" />
                   <SortHeader label="الخارج" k="outQty" />
                   <SortHeader label="الكمية" k="balance" />
@@ -1639,6 +1688,7 @@ function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner })
                     <td><CodeTag code={i.code} /></td>
                     <td className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</td>
                     <td className="cell-muted">{i.category || "—"}</td>
+                    {isOwner && <td className="cell-muted">{branchName(i.branch) || "—"}</td>}
                     <td className="cell-mono">{i.inQty}</td>
                     <td className="cell-mono">{i.outQty}</td>
                     <td className="cell-mono cell-balance">{i.balance}</td>
@@ -1825,10 +1875,221 @@ const NAV = [
   { key: "inventory", label: "المخزون", icon: Boxes },
   { key: "barcodes", label: "باركودات غير معنونة", icon: Barcode },
   { key: "audit", label: "سجل النشاط", icon: Hash },
+  { key: "reports", label: "التقارير والإحصائيات", icon: BarChart3 },
+  { key: "owners", label: "الرؤساء", icon: ShieldAlert, ownerOnly: true },
   { key: "users", label: "المستخدمون", icon: Users, ownerOnly: true },
   { key: "groups", label: "المجموعات", icon: Layers, ownerOnly: true },
-  { key: "branches", label: "الفروع", icon: MapPin, ownerOnly: true },
+  { key: "branches", label: "الأقسام", icon: MapPin, ownerOnly: true },
 ];
+
+// الصفحات التي يقدر رئيس الموقع يتيحها أو يمنعها لكل مستخدم (متحكم) على حدة.
+// لوحة التحكم دائماً متاحة للجميع كصفحة أساسية، وباقي صفحات الإدارة
+// (الرؤساء/المستخدمون/المجموعات/الأقسام) تبقى حصراً على رئيس الموقع دائماً.
+const GRANTABLE_PAGES = NAV.filter((n) => !n.ownerOnly && n.key !== "dashboard");
+
+// الصفحات التي يقدر الرئيس صاحب التحكم الكامل يتيحها أو يمنعها لرئيس آخر
+// "بصلاحيات محددة" — تشمل كل الصفحات (حتى صفحات الإدارة) عدا لوحة التحكم
+// التي تبقى متاحة للجميع دائماً.
+const OWNER_GRANTABLE_PAGES = NAV.filter((n) => n.key !== "dashboard");
+
+/* ------------------------------------------------------------------ */
+/*  OWNERS PAGE (إدارة رؤساء الموقع — كل رئيس باسم إجباري وكلمة مرور خاصة) */
+/* ------------------------------------------------------------------ */
+
+function OwnersPage({ data, setData, notify, currentOwnerId }) {
+  const [modal, setModal] = useState(null); // { mode, owner }
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const owners = data.owners || [];
+
+  const openAdd = () => setModal({ mode: "add", owner: { name: "", password: randomPassword(), permissions: null } });
+  const openEdit = (o) => setModal({ mode: "edit", owner: { ...o } });
+
+  const save = (form) => {
+    const name = form.name.trim();
+    if (!name || !form.password.trim()) {
+      notify("اسم الرئيس وكلمة المرور مطلوبان", "error");
+      return;
+    }
+    const dup = owners.some((o) => o.name === name && o.id !== form.id);
+    if (dup) { notify("هذا الاسم مستخدم لرئيس آخر بالفعل", "error"); return; }
+
+    const willBeRestricted = Array.isArray(form.permissions);
+    if (willBeRestricted) {
+      const otherFullOwners = owners.filter((o) => o.id !== form.id && !o.permissions).length;
+      if (otherFullOwners === 0) {
+        notify("لازم يبقى رئيس واحد على الأقل بتحكم كامل قبل تقييد صلاحيات البقية", "error");
+        return;
+      }
+    }
+
+    const record = {
+      id: form.id || genId("owner"), name, password: form.password.trim(),
+      permissions: willBeRestricted ? OWNER_GRANTABLE_PAGES.map((p) => p.key).filter((k) => form.permissions.includes(k)) : null,
+    };
+    const exists = owners.some((o) => o.id === record.id);
+    // نحافظ على سؤال/إجابة الاسترداد الحالية لو كانت موجودة عند التعديل
+    const merged = exists ? { ...owners.find((o) => o.id === record.id), ...record } : record;
+    const next = exists ? owners.map((o) => (o.id === merged.id ? merged : o)) : [...owners, merged];
+    setData({ ...data, owners: next });
+    setModal(null);
+    notify(exists ? "تم تحديث بيانات الرئيس" : "تمت إضافة رئيس جديد");
+  };
+
+  const remove = (id) => {
+    if (owners.length <= 1) {
+      notify("لازم يبقى رئيس واحد على الأقل — أضف رئيساً آخر قبل حذف هذا", "error");
+      setConfirmDelete(null);
+      return;
+    }
+    const target = owners.find((o) => o.id === id);
+    const remainingFullOwners = owners.filter((o) => o.id !== id && !o.permissions).length;
+    if (!target?.permissions && remainingFullOwners === 0) {
+      notify("لازم يبقى رئيس واحد على الأقل بتحكم كامل — عدّل صلاحيات رئيس آخر لتحكم كامل قبل حذف هذا", "error");
+      setConfirmDelete(null);
+      return;
+    }
+    setData({ ...data, owners: owners.filter((o) => o.id !== id) });
+    setConfirmDelete(null);
+    notify("تم حذف الرئيس");
+  };
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="إدارة الوصول" title="الرؤساء" subtitle="كل رئيس موقع له اسم إجباري وكلمة مرور خاصة به — تحكم كامل افتراضياً، أو صلاحيات محددة إن اخترت ذلك"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة رئيس</button>}
+      />
+      <div className="panel">
+        {owners.length === 0 ? (
+          <EmptyState icon={ShieldAlert} title="لا يوجد رؤساء بعد" hint="أضف رئيساً باسم وكلمة مرور خاصة به" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead><tr><th>الاسم</th><th>الصلاحيات</th><th>كلمة المرور</th><th></th></tr></thead>
+              <tbody>
+                {owners.map((o) => (
+                  <tr key={o.id}>
+                    <td className="cell-strong">
+                      {o.name}
+                      {o.id === currentOwnerId && <span className="stamp-badge" style={{ marginRight: 8, color: "var(--green)", borderColor: "var(--green)", background: "var(--green-bg)" }}>أنت</span>}
+                    </td>
+                    <td>
+                      {!o.permissions ? (
+                        <span className="stamp-badge" style={{ color: "var(--green)", borderColor: "var(--green)", background: "var(--green-bg)" }}>تحكم كامل</span>
+                      ) : o.permissions.length === 0 ? (
+                        <span className="stamp-badge" style={{ color: "var(--red)", borderColor: "var(--red)", background: "var(--red-bg)" }}>بدون صفحات</span>
+                      ) : (
+                        <span className="stamp-badge" style={{ color: "var(--amber)", borderColor: "var(--amber)", background: "var(--amber-bg)" }}>
+                          {o.permissions.length} من {OWNER_GRANTABLE_PAGES.length}
+                        </span>
+                      )}
+                    </td>
+                    <td className="cell-mono">{o.password}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="icon-btn" onClick={() => openEdit(o)}><Pencil size={15} /></button>
+                        <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(o)}><Trash2 size={15} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal wide title={modal.mode === "add" ? "إضافة رئيس" : "تعديل الرئيس"} onClose={() => setModal(null)}>
+          <OwnerForm owner={modal.owner} onCancel={() => setModal(null)} onSave={save} />
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">هل تريد حذف الرئيس «{confirmDelete.name}»؟ لن يتمكن من الدخول بعدها.</p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete.id)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function OwnerForm({ owner, onCancel, onSave }) {
+  const [form, setForm] = useState(owner);
+  const [showPass, setShowPass] = useState(false);
+  const restricted = Array.isArray(form.permissions);
+
+  return (
+    <div className="form-grid">
+      <Field label="اسم الرئيس">
+        <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: حسن" />
+      </Field>
+      <Field label="كلمة المرور">
+        <div className="scan-input-row">
+          <input
+            type={showPass ? "text" : "password"} className="input mono scan-input"
+            value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })}
+          />
+          <button type="button" className="scan-camera-btn" onClick={() => setShowPass((v) => !v)} title="إظهار/إخفاء">
+            {showPass ? <EyeOff size={15} /> : <Eye size={15} />}
+          </button>
+          <button type="button" className="scan-camera-btn" onClick={() => setForm({ ...form, password: randomPassword() })} title="توليد كلمة مرور">
+            <Shuffle size={15} />
+          </button>
+        </div>
+      </Field>
+      <Field label="نوع الصلاحية" full>
+        <div className="login-choices" style={{ gap: 6 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input type="radio" checked={!restricted} onChange={() => setForm({ ...form, permissions: null })} /> تحكم كامل — يشوف كل الصفحات ويقدر يدير الرؤساء والمستخدمين
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input
+              type="radio" checked={restricted}
+              onChange={() => setForm({ ...form, permissions: Array.isArray(form.permissions) ? form.permissions : OWNER_GRANTABLE_PAGES.map((p) => p.key) })}
+            /> صلاحيات محددة — حدد بنفسك أي صفحات يشوفها
+          </label>
+        </div>
+      </Field>
+      {restricted && (
+        <Field label="الصفحات المتاحة لهذا الرئيس" full>
+          <div className="perm-toolbar">
+            <button type="button" className="perm-toolbar-btn" onClick={() => setForm({ ...form, permissions: OWNER_GRANTABLE_PAGES.map((p) => p.key) })}>تحديد الكل</button>
+            <button type="button" className="perm-toolbar-btn" onClick={() => setForm({ ...form, permissions: [] })}>إلغاء الكل</button>
+          </div>
+          <div className="perm-grid">
+            {OWNER_GRANTABLE_PAGES.map((p) => {
+              const checked = (form.permissions || []).includes(p.key);
+              return (
+                <label key={p.key} className={`perm-check ${checked ? "perm-check-active" : ""}`}>
+                  <input
+                    type="checkbox" checked={checked}
+                    onChange={() => setForm({
+                      ...form,
+                      permissions: checked
+                        ? (form.permissions || []).filter((k) => k !== p.key)
+                        : [...(form.permissions || []), p.key],
+                    })}
+                  />
+                  <p.icon size={14} />
+                  <span>{p.label}</span>
+                </label>
+              );
+            })}
+          </div>
+        </Field>
+      )}
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /*  USERS PAGE (site owner only)                                      */
@@ -1850,8 +2111,8 @@ function UsersPage({ data, setData, notify }) {
   const [modal, setModal] = useState(null); // { mode, user }
   const [confirmDelete, setConfirmDelete] = useState(null);
 
-  const openAdd = () => setModal({ mode: "add", user: { username: "", password: randomPassword(), canEdit: true, temp: false, durationKey: "1d" } });
-  const openEdit = (u) => setModal({ mode: "edit", user: { ...u, temp: !!u.tempUntil, durationKey: "1d" } });
+  const openAdd = () => setModal({ mode: "add", user: { username: "", password: randomPassword(), canEdit: true, temp: false, durationKey: "1d", permissions: GRANTABLE_PAGES.map((p) => p.key) } });
+  const openEdit = (u) => setModal({ mode: "edit", user: { ...u, temp: !!u.tempUntil, durationKey: "1d", permissions: u.permissions || GRANTABLE_PAGES.map((p) => p.key) } });
 
   const save = (form) => {
     const username = form.username.trim();
@@ -1872,6 +2133,7 @@ function UsersPage({ data, setData, notify }) {
       password: form.password.trim(),
       canEdit: !!form.canEdit,
       restrictedBranch: form.restrictedBranch || "",
+      permissions: GRANTABLE_PAGES.map((p) => p.key).filter((k) => (form.permissions || []).includes(k)),
       tempUntil,
       createdAt: form.createdAt || Date.now(),
     };
@@ -1902,7 +2164,7 @@ function UsersPage({ data, setData, notify }) {
           <div className="table-wrap">
             <table className="ledger-table">
               <thead>
-                <tr><th>اسم المستخدم</th><th>الصلاحية</th><th>الفرع</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
+                <tr><th>اسم المستخدم</th><th>الصلاحية</th><th>القسم</th><th>الصفحات المتاحة</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
               </thead>
               <tbody>
                 {data.users.map((u) => {
@@ -1917,7 +2179,18 @@ function UsersPage({ data, setData, notify }) {
                           {u.canEdit ? "يقدر يعدّل" : "قراءة فقط"}
                         </span>
                       </td>
-                      <td className="cell-strong">{u.restrictedBranch ? (data.branches.find((b) => b.id === u.restrictedBranch)?.name || "—") : "كل الفروع"}</td>
+                      <td className="cell-strong">{u.restrictedBranch ? (data.branches.find((b) => b.id === u.restrictedBranch)?.name || "—") : "كل الأقسام"}</td>
+                      <td>
+                        {!u.permissions || u.permissions.length === GRANTABLE_PAGES.length ? (
+                          <span className="stamp-badge" style={{ color: "var(--green)", borderColor: "var(--green)", background: "var(--green-bg)" }}>كل الصفحات</span>
+                        ) : u.permissions.length === 0 ? (
+                          <span className="stamp-badge" style={{ color: "var(--red)", borderColor: "var(--red)", background: "var(--red-bg)" }}>بدون صفحات</span>
+                        ) : (
+                          <span className="stamp-badge" style={{ color: "var(--amber)", borderColor: "var(--amber)", background: "var(--amber-bg)" }}>
+                            {u.permissions.length} من {GRANTABLE_PAGES.length}
+                          </span>
+                        )}
+                      </td>
                       <td className="cell-mono">{u.password}</td>
                       <td>
                         {u.tempUntil ? (
@@ -2000,11 +2273,37 @@ function UserForm({ user, branches, onCancel, onSave }) {
           </label>
         </div>
       </Field>
-      <Field label="الفرع المخصص (اختياري)">
+      <Field label="القسم المخصص (اختياري)">
         <select className="input" value={form.restrictedBranch || ""} onChange={(e) => setForm({ ...form, restrictedBranch: e.target.value })}>
-          <option value="">كل الفروع</option>
+          <option value="">كل الأقسام</option>
           {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
+      </Field>
+      <Field label="الصفحات المتاحة لهذا المستخدم" full>
+        <div className="perm-toolbar">
+          <button type="button" className="perm-toolbar-btn" onClick={() => setForm({ ...form, permissions: GRANTABLE_PAGES.map((p) => p.key) })}>تحديد الكل</button>
+          <button type="button" className="perm-toolbar-btn" onClick={() => setForm({ ...form, permissions: [] })}>إلغاء الكل</button>
+        </div>
+        <div className="perm-grid">
+          {GRANTABLE_PAGES.map((p) => {
+            const checked = (form.permissions || []).includes(p.key);
+            return (
+              <label key={p.key} className={`perm-check ${checked ? "perm-check-active" : ""}`}>
+                <input
+                  type="checkbox" checked={checked}
+                  onChange={() => setForm({
+                    ...form,
+                    permissions: checked
+                      ? (form.permissions || []).filter((k) => k !== p.key)
+                      : [...(form.permissions || []), p.key],
+                  })}
+                />
+                <p.icon size={14} />
+                <span>{p.label}</span>
+              </label>
+            );
+          })}
+        </div>
       </Field>
       <Field label="نوع كلمة المرور">
         <div className="login-choices" style={{ gap: 6 }}>
@@ -2133,7 +2432,7 @@ function GroupForm({ group, onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  BRANCHES PAGE (site owner only) — تحصر مخزون/صلاحية كل منظم بفرعه   */
+/*  DEPARTMENTS PAGE (site owner only) — تحصر مخزون/صلاحية كل منظم بقسمه   */
 /* ------------------------------------------------------------------ */
 
 function BranchesPage({ data, setData, notify }) {
@@ -2147,37 +2446,37 @@ function BranchesPage({ data, setData, notify }) {
   const openEdit = (b) => setModal({ mode: "edit", branch: { ...b } });
 
   const save = (form) => {
-    if (!form.name.trim()) { notify("اسم الفرع مطلوب", "error"); return; }
+    if (!form.name.trim()) { notify("اسم القسم مطلوب", "error"); return; }
     const record = { id: form.id || genId("br"), name: form.name.trim() };
     const exists = data.branches.some((b) => b.id === record.id);
     const branches = exists ? data.branches.map((b) => (b.id === record.id ? record : b)) : [...data.branches, record];
     setData({ ...data, branches });
     setModal(null);
-    notify(exists ? "تم تحديث الفرع" : "تمت إضافة الفرع");
+    notify(exists ? "تم تحديث القسم" : "تمت إضافة القسم");
   };
 
   const remove = (id) => {
-    // الأصناف والمستخدمون المرتبطون بهذا الفرع يرجعون لبدون فرع بدل ما يُحذفوا
+    // الأصناف والمستخدمون المرتبطون بهذا القسم يرجعون لبدون قسم بدل ما يُحذفوا
     const items = data.items.map((i) => (i.branch === id ? { ...i, branch: "" } : i));
     const users = data.users.map((u) => (u.restrictedBranch === id ? { ...u, restrictedBranch: "" } : u));
     setData({ ...data, branches: data.branches.filter((b) => b.id !== id), items, users });
     setConfirmDelete(null);
-    notify("تم حذف الفرع");
+    notify("تم حذف القسم");
   };
 
   return (
     <div className="page">
       <PageHeader
-        eyebrow="مواقع المستودع" title="الفروع" subtitle="اربط كل صنف بفرعه، وقيّد كل منظم بفرع واحد فقط من صفحة المستخدمين"
-        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة فرع</button>}
+        eyebrow="مواقع المستودع" title="الأقسام" subtitle="اربط كل صنف بقسمه، وقيّد كل منظم بقسم واحد فقط من صفحة المستخدمين"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة قسم</button>}
       />
       <div className="panel">
         {data.branches.length === 0 ? (
-          <EmptyState icon={MapPin} title="لا توجد فروع بعد" hint="أضف فرعاً مثل «الفرع الرئيسي» أو «مستودع الرياض»" />
+          <EmptyState icon={MapPin} title="لا توجد أقسام بعد" hint="أضف قسماً مثل «القسم الرئيسي» أو «مستودع الرياض»" />
         ) : (
           <div className="table-wrap">
             <table className="ledger-table">
-              <thead><tr><th>اسم الفرع</th><th>عدد الأصناف</th><th>عدد المنظمين المقيّدين فيه</th><th></th></tr></thead>
+              <thead><tr><th>اسم القسم</th><th>عدد الأصناف</th><th>عدد المنظمين المقيّدين فيه</th><th></th></tr></thead>
               <tbody>
                 {data.branches.map((b) => (
                   <tr key={b.id}>
@@ -2199,14 +2498,14 @@ function BranchesPage({ data, setData, notify }) {
       </div>
 
       {modal && (
-        <Modal title={modal.mode === "add" ? "إضافة فرع" : "تعديل الفرع"} onClose={() => setModal(null)}>
+        <Modal title={modal.mode === "add" ? "إضافة قسم" : "تعديل القسم"} onClose={() => setModal(null)}>
           <BranchForm branch={modal.branch} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
       {confirmDelete && (
         <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
-          <p className="confirm-text">هل تريد حذف فرع «{confirmDelete.name}»؟ الأصناف والمستخدمون المرتبطون به يرجعون بدون فرع محدد (رئيس الموقع يبقى يشوف كل شيء دائماً).</p>
+          <p className="confirm-text">هل تريد حذف قسم «{confirmDelete.name}»؟ الأصناف والمستخدمون المرتبطون به يرجعون بدون قسم محدد (رئيس الموقع يبقى يشوف كل شيء دائماً).</p>
           <div className="modal-actions">
             <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
             <button className="btn-danger" onClick={() => remove(confirmDelete.id)}>حذف نهائياً</button>
@@ -2221,10 +2520,10 @@ function BranchForm({ branch, onCancel, onSave }) {
   const [form, setForm] = useState(branch);
   return (
     <div className="form-grid">
-      <Field label="اسم الفرع">
+      <Field label="اسم القسم">
         <input
           autoFocus className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
-          placeholder="مثال: الفرع الرئيسي، مستودع جدة"
+          placeholder="مثال: القسم الرئيسي، مستودع جدة"
         />
       </Field>
       <div className="modal-actions">
@@ -2239,15 +2538,15 @@ function BranchForm({ branch, onCancel, onSave }) {
 /*  ACCOUNT / PASSWORD MODAL (site owner)                             */
 /* ------------------------------------------------------------------ */
 
-function ChangeOwnerPasswordModal({ currentPassword, currentRecoveryQuestion, currentRecoveryAnswer, onSave, onClose, notify }) {
+function ChangeOwnerPasswordModal({ owner, onSave, onClose, notify }) {
   const [oldPass, setOldPass] = useState("");
   const [newPass, setNewPass] = useState("");
   const [newPass2, setNewPass2] = useState("");
-  const [recoveryQuestion, setRecoveryQuestion] = useState(currentRecoveryQuestion || "");
-  const [recoveryAnswer, setRecoveryAnswer] = useState(currentRecoveryAnswer || "");
+  const [recoveryQuestion, setRecoveryQuestion] = useState(owner?.recoveryQuestion || "");
+  const [recoveryAnswer, setRecoveryAnswer] = useState(owner?.recoveryAnswer || "");
 
   const submit = () => {
-    if (oldPass !== currentPassword) { notify("كلمة المرور الحالية غير صحيحة", "error"); return; }
+    if (oldPass !== owner?.password) { notify("كلمة المرور الحالية غير صحيحة", "error"); return; }
     if (!newPass.trim() || newPass.length < 4) { notify("كلمة المرور الجديدة قصيرة جداً", "error"); return; }
     if (newPass !== newPass2) { notify("كلمتا المرور الجديدتان غير متطابقتين", "error"); return; }
     if ((recoveryQuestion.trim() && !recoveryAnswer.trim()) || (!recoveryQuestion.trim() && recoveryAnswer.trim())) {
@@ -2259,7 +2558,7 @@ function ChangeOwnerPasswordModal({ currentPassword, currentRecoveryQuestion, cu
   };
 
   return (
-    <Modal title="تغيير كلمة مرور رئيس الموقع" onClose={onClose}>
+    <Modal title={`تغيير كلمة مرور ${owner?.name || "رئيس الموقع"}`} onClose={onClose}>
       <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
         <Field label="كلمة المرور الحالية">
           <input type="password" className="input" value={oldPass} onChange={(e) => setOldPass(e.target.value)} />
@@ -2510,13 +2809,19 @@ function timeAgoAr(ts) {
   return `قبل ${day} يوم`;
 }
 
-function AuditPage({ log }) {
+function AuditPage({ log, isOwner, currentUser }) {
   const [query, setQuery] = useState("");
   const [byFilter, setByFilter] = useState("all");
 
-  const actors = useMemo(() => [...new Set(log.map((e) => e.by || "—"))], [log]);
+  // منظم عادي يشوف نشاطه هو فقط؛ رئيس الموقع فقط يشوف سجل الجميع
+  const visibleLog = useMemo(
+    () => (isOwner ? log : log.filter((e) => e.by === (currentUser?.username || "مستخدم"))),
+    [log, isOwner, currentUser]
+  );
 
-  const filtered = log
+  const actors = useMemo(() => [...new Set(visibleLog.map((e) => e.by || "—"))], [visibleLog]);
+
+  const filtered = visibleLog
     .filter((e) => byFilter === "all" || (e.by || "—") === byFilter)
     .filter((e) => fuzzyIncludes(e.msg + (e.by || ""), query));
 
@@ -2525,11 +2830,12 @@ function AuditPage({ log }) {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="تدقيق" title="سجل النشاط" subtitle="كل العمليات على المستودع من أي جهاز أو منظم — محفوظة بشكل دائم"
+        eyebrow="تدقيق" title="سجل النشاط"
+        subtitle={isOwner ? "كل العمليات على المستودع من أي جهاز أو منظم — محفوظة بشكل دائم" : "نشاطك أنت فقط على المستودع — محفوظ بشكل دائم"}
         action={rows.length > 0 && <button className="btn-ghost" onClick={() => downloadCSV("سجل_النشاط.csv", rows, ["time", "by", "event"])}><Download size={15} /> تصدير CSV</button>}
       />
 
-      {log.length > 0 && (
+      {visibleLog.length > 0 && (
         <div className="toolbar">
           <div className="search-box">
             <Search size={16} />
@@ -2543,8 +2849,8 @@ function AuditPage({ log }) {
       )}
 
       <div className="panel">
-        {log.length === 0 ? (
-          <EmptyState icon={Clock} title="لا يوجد نشاط مسجّل بعد" hint="سيظهر هنا كل إضافة أو تعديل أو حذف يقوم به أي منظم" />
+        {visibleLog.length === 0 ? (
+          <EmptyState icon={Clock} title="لا يوجد نشاط مسجّل بعد" hint={isOwner ? "سيظهر هنا كل إضافة أو تعديل أو حذف يقوم به أي منظم" : "سيظهر هنا كل إضافة أو تعديل أو حذف تقوم به أنت"} />
         ) : filtered.length === 0 ? (
           <EmptyState icon={Search} title="لا نتائج مطابقة" hint="جرّب كلمة بحث أو فلتر مختلف" />
         ) : (
@@ -2580,15 +2886,16 @@ function AuditPage({ log }) {
 const ROLE_KEY = "warehouse-role";
 
 // نافذة استرداد كلمة المرور — تظهر داخل نافذة الدخول للتحكم
-function ForgotPasswordPanel({ mode, data, onClose }) {
+function ForgotPasswordPanel({ mode, data, ownerNameInput, onClose }) {
   const [answer, setAnswer] = useState("");
   const [revealed, setRevealed] = useState(false);
   const [err, setErr] = useState("");
-  const hasQuestion = mode === "owner" && !!(data?.ownerRecoveryQuestion || "").trim();
+  const owner = mode === "owner" ? (data.owners || []).find((o) => o.name === (ownerNameInput || "").trim()) : null;
+  const hasQuestion = mode === "owner" && !!(owner?.recoveryQuestion || "").trim();
 
   const checkAnswer = (e) => {
     e.preventDefault();
-    const correct = (data?.ownerRecoveryAnswer || "").trim().toLowerCase();
+    const correct = (owner?.recoveryAnswer || "").trim().toLowerCase();
     if (answer.trim().toLowerCase() === correct && correct !== "") {
       setRevealed(true);
       setErr("");
@@ -2603,20 +2910,24 @@ function ForgotPasswordPanel({ mode, data, onClose }) {
         <p className="confirm-text">
           كلمات مرور المستخدمين يديرها رئيس الموقع من صفحة «المستخدمون» — تواصل معه لإعادة تعيين كلمة مرورك.
         </p>
+      ) : mode === "owner" && !owner ? (
+        <p className="confirm-text">
+          اكتب اسم الرئيس أولاً بخانة "اسم الرئيس" أعلاه، ثم اضغط "نسيت كلمة المرور؟" مرة ثانية.
+        </p>
       ) : !hasQuestion ? (
         <p className="confirm-text">
-          لم يتم إعداد سؤال استرداد لكلمة مرور رئيس الموقع بعد. يمكنك إعداده لاحقاً من «تغيير كلمة المرور»
+          لم يتم إعداد سؤال استرداد لكلمة مرور «{owner.name}» بعد. يمكن إعداده لاحقاً من «تغيير كلمة المرور»
           بعد الدخول. كلمة المرور الافتراضية عند أول تشغيل للموقع هي <strong>admin</strong> إن لم تُغيَّر بعد.
         </p>
       ) : revealed ? (
         <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
-          <p className="confirm-text">كلمة مرور رئيس الموقع الحالية هي:</p>
-          <div className="recovered-pass">{data.ownerPassword}</div>
+          <p className="confirm-text">كلمة مرور «{owner.name}» الحالية هي:</p>
+          <div className="recovered-pass">{owner.password}</div>
           <p className="confirm-text" style={{ fontSize: 12.5 }}>يُفضّل تغييرها فور الدخول من «تغيير كلمة المرور».</p>
         </div>
       ) : (
         <form className="form-grid" style={{ gridTemplateColumns: "1fr" }} onSubmit={checkAnswer}>
-          <Field label={data.ownerRecoveryQuestion}>
+          <Field label={owner.recoveryQuestion}>
             <input autoFocus className="input" value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="إجابتك" />
           </Field>
           {err && <div className="alert alert-error"><AlertTriangle size={15} /> {err}</div>}
@@ -2645,14 +2956,16 @@ function ControlLoginModal({ onEnter, onClose, data }) {
   const submitOwner = (e) => {
     e.preventDefault();
     if (!data) return;
-    if (password === data.ownerPassword) {
-      setError("");
-      const name = ownerName.trim();
-      try { localStorage.setItem("warehouse-owner-display-name", name); } catch {}
-      onEnter({ type: "owner", ownerName: name });
-    } else {
-      setError("كلمة المرور غير صحيحة");
+    const name = ownerName.trim();
+    if (!name) { setError("اسم الرئيس مطلوب"); return; }
+    const owner = (data.owners || []).find((o) => o.name === name);
+    if (!owner || password !== owner.password) {
+      setError("اسم الرئيس أو كلمة المرور غير صحيحة");
+      return;
     }
+    setError("");
+    try { localStorage.setItem("warehouse-owner-display-name", name); } catch {}
+    onEnter({ type: "owner", ownerId: owner.id, ownerName: owner.name });
   };
 
   const submitUser = (e) => {
@@ -2694,12 +3007,15 @@ function ControlLoginModal({ onEnter, onClose, data }) {
         </div>
       ) : mode === "owner" ? (
         <form className="login-admin-form" onSubmit={submitOwner}>
-          <Field label="اسمك (اختياري — يظهر بسجل النشاط بدل «رئيس الموقع» فقط)">
+          <Field label="اسم الرئيس">
             <input
-              autoFocus className="input"
+              autoFocus className="input" list="owner-names-list"
               value={ownerName} onChange={(e) => setOwnerName(e.target.value)}
-              placeholder="مثال: محمد"
+              placeholder="مثال: حسن"
             />
+            <datalist id="owner-names-list">
+              {(data.owners || []).map((o) => <option key={o.id} value={o.name} />)}
+            </datalist>
           </Field>
           <Field label="كلمة مرور رئيس الموقع">
             <input
@@ -2731,7 +3047,7 @@ function ControlLoginModal({ onEnter, onClose, data }) {
           </div>
         </form>
       )}
-      {showForgot && <ForgotPasswordPanel mode={mode || "owner"} data={data} onClose={() => setShowForgot(false)} />}
+      {showForgot && <ForgotPasswordPanel mode={mode || "owner"} data={data} ownerNameInput={ownerName} onClose={() => setShowForgot(false)} />}
     </Modal>
   );
 }
@@ -2834,6 +3150,279 @@ function ThemeToggle({ themePref, effectiveTheme, onSet }) {
               {themePref === o.key && <Check size={13} style={{ marginInlineStart: "auto" }} />}
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  REPORTS PAGE (site owner only) — تقارير وإحصائيات وتحليلات شاملة     */
+/*  لكل الموقع: توزيع الأصناف، حركة المخزون، أكثر الأصناف تداولاً،        */
+/*  حالة المهام، ونشاط المستخدمين — كلها مشتقّة من البيانات الحالية       */
+/*  دون الحاجة لأي حقول أو تخزين إضافي.                                  */
+/* ------------------------------------------------------------------ */
+
+function ReportsPage({ data, inventory, auditLog }) {
+  const total = inventory.length;
+  const availableCount = inventory.filter((i) => i.status === "available").length;
+  const lowCount = inventory.filter((i) => i.status === "low").length;
+  const emptyCount = inventory.filter((i) => i.status === "empty").length;
+  const pct = (n) => (total ? Math.round((n / total) * 100) : 0);
+
+  const totalBalance = useMemo(
+    () => Math.round(inventory.reduce((s, i) => s + (Number(i.balance) || 0), 0) * 100) / 100,
+    [inventory]
+  );
+  const totalIn = useMemo(
+    () => (data.incoming || []).reduce((s, r) => s + (Number(r.qty) || 0), 0),
+    [data.incoming]
+  );
+  const totalOut = useMemo(
+    () => (data.outgoing || []).reduce((s, r) => s + (Number(r.qty) || 0), 0),
+    [data.outgoing]
+  );
+  const maxFlow = Math.max(1, totalIn, totalOut);
+
+  // توزيع الأصناف حسب القسم
+  const byDepartment = useMemo(() => {
+    const nameOf = (id) => (data.branches || []).find((b) => b.id === id)?.name;
+    const map = new Map();
+    inventory.forEach((i) => {
+      const b = nameOf(i.branch) || "بدون قسم";
+      map.set(b, (map.get(b) || 0) + 1);
+    });
+    const t = inventory.length || 1;
+    return [...map.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count, pct: Math.round((count / t) * 100) }));
+  }, [inventory, data.branches]);
+  const maxDept = Math.max(1, ...byDepartment.map((d) => d.count));
+
+  // توزيع الأصناف حسب المجموعة
+  const byGroup = useMemo(() => {
+    const nameOf = (id) => data.itemGroups.find((g) => g.id === id)?.name;
+    const map = new Map();
+    inventory.forEach((i) => {
+      const g = nameOf(i.group) || "بدون مجموعة";
+      map.set(g, (map.get(g) || 0) + 1);
+    });
+    const t = inventory.length || 1;
+    return [...map.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count, pct: Math.round((count / t) * 100) }));
+  }, [inventory, data.itemGroups]);
+  const maxGroup = Math.max(1, ...byGroup.map((g) => g.count));
+
+  // الأصناف الأكثر حركة (دخول + خروج) — أعلى 8
+  const topMovers = useMemo(() => {
+    return inventory
+      .map((i) => ({ code: i.code, name: i.name, emoji: i.emoji, moves: (Number(i.inQty) || 0) + (Number(i.outQty) || 0) }))
+      .filter((i) => i.moves > 0)
+      .sort((a, b) => b.moves - a.moves)
+      .slice(0, 8);
+  }, [inventory]);
+  const maxMoves = Math.max(1, ...topMovers.map((m) => m.moves));
+
+  // تنبيهات الصلاحية حسب الفئة
+  const expiryBreakdown = useMemo(() => {
+    const tiers = ["expired", "critical", "warning", "notice"];
+    return tiers
+      .map((t) => ({ tier: t, meta: EXPIRY_TIER_META[t], count: inventory.filter((i) => i.expiry === t).length }))
+      .filter((t) => t.count > 0);
+  }, [inventory]);
+
+  // إحصائيات المهام
+  const tasks = data.tasks || [];
+  const tasksDone = tasks.filter((t) => t.done).length;
+  const tasksPending = tasks.length - tasksDone;
+  const tasksOverdue = tasks.filter((t) => !t.done && t.dueDate && t.dueDate < todayISO()).length;
+  const tasksDonePct = tasks.length ? Math.round((tasksDone / tasks.length) * 100) : 0;
+
+  // أكثر المستخدمين نشاطاً (حسب سجل النشاط) — أعلى 6
+  const topActors = useMemo(() => {
+    const map = new Map();
+    (auditLog || []).forEach((e) => { const k = e.by || "—"; map.set(k, (map.get(k) || 0) + 1); });
+    return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, count]) => ({ name, count }));
+  }, [auditLog]);
+  const maxActor = Math.max(1, ...topActors.map((a) => a.count));
+
+  const kpis = [
+    { label: "إجمالي الأصناف", value: total, icon: Boxes, tone: "navy" },
+    { label: "إجمالي الكمية المتوفرة", value: totalBalance, icon: Package, tone: "green" },
+    { label: "نسبة الأصناف المتوفرة", value: `${pct(availableCount)}%`, icon: Percent, tone: "green" },
+    { label: "نسبة النقص والنفاد", value: `${pct(lowCount + emptyCount)}%`, icon: TriangleAlert, tone: "amber" },
+  ];
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="تحليلات" title="التقارير والإحصائيات"
+        subtitle="نظرة شاملة على أداء المستودع: توزيع الأصناف، حركة المخزون، المهام، ونشاط المستخدمين"
+      />
+
+      <div className="stat-grid">
+        {kpis.map((s) => (
+          <div key={s.label} className={`stat-card tone-${s.tone}`}>
+            <s.icon size={20} strokeWidth={2} />
+            <div className="stat-value">{s.value}</div>
+            <div className="stat-label">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="chart-grid">
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">توزيع الأصناف حسب القسم</span>
+            <span className="panel-sub">عدد الأصناف ونسبتها في كل قسم</span>
+          </div>
+          <div className="mini-chart">
+            {byDepartment.length === 0 ? (
+              <EmptyState icon={MapPin} title="لا توجد بيانات كافية" />
+            ) : byDepartment.map((d) => (
+              <div className="mini-chart-row" key={d.name}>
+                <span className="mini-chart-label">{d.name}</span>
+                <div className="mini-chart-track">
+                  <div className="mini-chart-bar" style={{ width: `${(d.count / maxDept) * 100}%` }} />
+                </div>
+                <span className="mini-chart-val">{d.count} <span className="mini-chart-pct">({d.pct}%)</span></span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">توزيع الأصناف حسب المجموعة</span>
+            <span className="panel-sub">عدد الأصناف ونسبتها في كل مجموعة</span>
+          </div>
+          <div className="mini-chart">
+            {byGroup.length === 0 ? (
+              <EmptyState icon={Layers} title="لا توجد بيانات كافية" />
+            ) : byGroup.map((g) => (
+              <div className="mini-chart-row" key={g.name}>
+                <span className="mini-chart-label">{suggestEmojiForGroup(g.name) ? `${suggestEmojiForGroup(g.name)} ` : ""}{g.name}</span>
+                <div className="mini-chart-track">
+                  <div className="mini-chart-bar mini-chart-bar-amber" style={{ width: `${(g.count / maxGroup) * 100}%` }} />
+                </div>
+                <span className="mini-chart-val">{g.count} <span className="mini-chart-pct">({g.pct}%)</span></span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="chart-grid">
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">إجمالي حركة المخزون</span>
+            <span className="panel-sub">مجموع كل عمليات الدخول مقابل الخروج منذ البداية</span>
+          </div>
+          <div className="mini-chart">
+            <div className="mini-chart-row">
+              <span className="mini-chart-label"><ArrowDownToLine size={12} style={{ opacity: 0.6, marginLeft: 4 }} />داخل</span>
+              <div className="mini-chart-track">
+                <div className="mini-chart-bar" style={{ width: `${(totalIn / maxFlow) * 100}%`, background: "var(--green)" }} />
+              </div>
+              <span className="mini-chart-val">{totalIn}</span>
+            </div>
+            <div className="mini-chart-row">
+              <span className="mini-chart-label"><ArrowUpFromLine size={12} style={{ opacity: 0.6, marginLeft: 4 }} />خارج</span>
+              <div className="mini-chart-track">
+                <div className="mini-chart-bar" style={{ width: `${(totalOut / maxFlow) * 100}%`, background: "var(--red)" }} />
+              </div>
+              <span className="mini-chart-val">{totalOut}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">الأصناف الأكثر تداولاً</span>
+            <span className="panel-sub">أعلى 8 أصناف من حيث إجمالي الدخول والخروج</span>
+          </div>
+          <div className="mini-chart">
+            {topMovers.length === 0 ? (
+              <EmptyState icon={TrendingUp} title="لا توجد حركات كافية بعد" />
+            ) : topMovers.map((m) => (
+              <div className="mini-chart-row" key={m.code}>
+                <span className="mini-chart-label">{m.emoji ? `${m.emoji} ` : ""}{m.name}</span>
+                <div className="mini-chart-track">
+                  <div className="mini-chart-bar" style={{ width: `${(m.moves / maxMoves) * 100}%` }} />
+                </div>
+                <span className="mini-chart-val">{m.moves}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="chart-grid">
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">إنجاز المهام</span>
+            <span className="panel-sub">{tasks.length ? `${tasksDonePct}% من المهام تم إنجازها` : "لا توجد مهام مسجّلة بعد"}</span>
+          </div>
+          <div className="mini-chart">
+            <div className="mini-chart-row">
+              <span className="mini-chart-label"><Check size={12} style={{ opacity: 0.6, marginLeft: 4 }} />منجزة</span>
+              <div className="mini-chart-track">
+                <div className="mini-chart-bar" style={{ width: `${tasks.length ? (tasksDone / tasks.length) * 100 : 0}%`, background: "var(--green)" }} />
+              </div>
+              <span className="mini-chart-val">{tasksDone}</span>
+            </div>
+            <div className="mini-chart-row">
+              <span className="mini-chart-label"><ListChecks size={12} style={{ opacity: 0.6, marginLeft: 4 }} />معلّقة</span>
+              <div className="mini-chart-track">
+                <div className="mini-chart-bar" style={{ width: `${tasks.length ? (tasksPending / tasks.length) * 100 : 0}%`, background: "var(--amber)" }} />
+              </div>
+              <span className="mini-chart-val">{tasksPending}</span>
+            </div>
+            <div className="mini-chart-row">
+              <span className="mini-chart-label"><Clock size={12} style={{ opacity: 0.6, marginLeft: 4 }} />متأخرة</span>
+              <div className="mini-chart-track">
+                <div className="mini-chart-bar" style={{ width: `${tasks.length ? (tasksOverdue / tasks.length) * 100 : 0}%`, background: "var(--red)" }} />
+              </div>
+              <span className="mini-chart-val">{tasksOverdue}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">أكثر المستخدمين نشاطاً</span>
+            <span className="panel-sub">عدد العمليات المسجّلة لكل مستخدم في سجل النشاط</span>
+          </div>
+          <div className="mini-chart">
+            {topActors.length === 0 ? (
+              <EmptyState icon={Users} title="لا يوجد نشاط مسجّل بعد" />
+            ) : topActors.map((a) => (
+              <div className="mini-chart-row" key={a.name}>
+                <span className="mini-chart-label">{a.name}</span>
+                <div className="mini-chart-track">
+                  <div className="mini-chart-bar mini-chart-bar-amber" style={{ width: `${(a.count / maxActor) * 100}%` }} />
+                </div>
+                <span className="mini-chart-val">{a.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {expiryBreakdown.length > 0 && (
+        <div className="panel">
+          <div className="panel-head">
+            <span className="panel-title">تنبيهات الصلاحية</span>
+            <span className="panel-sub">عدد الأصناف في كل فئة من فئات اقتراب انتهاء الصلاحية</span>
+          </div>
+          <div className="mini-chart">
+            {expiryBreakdown.map((e) => (
+              <div className="mini-chart-row" key={e.tier}>
+                <span className="mini-chart-label">{e.meta.label}</span>
+                <div className="mini-chart-track">
+                  <div className="mini-chart-bar" style={{ width: `${(e.count / total) * 100}%`, background: e.meta.ink }} />
+                </div>
+                <span className="mini-chart-val">{e.count}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -3055,9 +3644,25 @@ function App() {
   const isOwner = session.type === "owner";
   const isGuest = session.type !== "owner" && session.type !== "user";
   const currentUser = session.type === "user" ? data.users.find((u) => u.id === session.userId) : null;
+  const currentOwner = isOwner ? (data.owners || []).find((o) => o.id === session.ownerId) : null;
   actorRef.current = isOwner
-    ? (session.ownerName ? `${session.ownerName} (رئيس الموقع)` : "رئيس الموقع")
+    ? (currentOwner ? `${currentOwner.name} (رئيس الموقع)` : "رئيس الموقع")
     : (currentUser?.username || "مستخدم");
+
+  // رئيس تم حذف حسابه (من رئيس آخر) وهو ما زال بجلسة مفتوحة — إخراج فوري
+  if (session.type === "owner" && !currentOwner) {
+    setTimeout(() => {
+      logout();
+      notify("تم حذف حسابك — تواصل مع رئيس آخر بالموقع", "error");
+    }, 0);
+    return (
+      <div className="boot-screen">
+        <FontStyles />
+        <div className="boot-mark">⏳</div>
+        <div>جارٍ تسجيل الخروج…</div>
+      </div>
+    );
+  }
 
   // مستخدم مؤقت انتهت صلاحيته أو حُذف حسابه — إخراج فوري
   if (session.type === "user" && (!currentUser || isTempExpired(currentUser))) {
@@ -3119,20 +3724,40 @@ function App() {
     );
   }
 
-  // كل مستخدم مسجّل دخول (رئيس الموقع أو مستخدم) يشوف كل صفحات التشغيل؛
-  // الفرق فقط: هل يقدر يعدّل (readOnly) وهل يشوف صفحتي المستخدمين/المجموعات (owner فقط)
+  // كل مستخدم مسجّل دخول (رئيس الموقع أو مستخدم) يشوف الصفحات المتاحة له فقط؛
+  // رئيس الموقع "بتحكم كامل" (permissions: null) يشوف كل شيء دائماً كسابق.
+  // رئيس "بصلاحيات محددة" يشوف فقط الصفحات المفعّلة له من صفحة الرؤساء —
+  // تماماً كالمستخدم العادي، لكن بإمكانية الوصول لصفحات الإدارة (الرؤساء/
+  // المستخدمون/المجموعات/الأقسام) إن مُنحها تحديداً. المستخدم (متحكم) يشوف
+  // "لوحة التحكم" دائماً بالإضافة لأي صفحة من GRANTABLE_PAGES فُعّلت له —
+  // وإن لم تُحدَّد صلاحياته بعد (مستخدم قديم) يشوف كل الصفحات المتاحة كسابق
+  // افتراضياً حتى لا ينكسر شيء بالترقية.
   const readOnly = currentUser ? !currentUser.canEdit : false;
-  const allowedKeys = NAV.filter((n) => !n.ownerOnly).map((n) => n.key);
-  const visibleNav = NAV.filter((n) => (n.ownerOnly ? isOwner : allowedKeys.includes(n.key)));
+  const isRestrictedOwner = isOwner && Array.isArray(currentOwner?.permissions);
+  const nonOwnerKeys = NAV.filter((n) => !n.ownerOnly).map((n) => n.key);
+  const allowedKeys = isOwner
+    ? (isRestrictedOwner
+        ? nonOwnerKeys.filter((k) => k === "dashboard" || currentOwner.permissions.includes(k))
+        : nonOwnerKeys)
+    : nonOwnerKeys.filter((k) => k === "dashboard" || !currentUser?.permissions || currentUser.permissions.includes(k));
+  const visibleNav = NAV.filter((n) => {
+    if (!n.ownerOnly) return allowedKeys.includes(n.key);
+    if (!isOwner) return false;
+    return !isRestrictedOwner || currentOwner.permissions.includes(n.key);
+  });
   const safePage = allowedKeys.includes(page) || (n2ok(page)) ? page : (allowedKeys[0] || "dashboard");
-  function n2ok(p) { return (p === "users" || p === "groups") && isOwner; }
+  function n2ok(p) {
+    if (!NAV.some((n) => n.key === p && n.ownerOnly)) return false;
+    if (!isOwner) return false;
+    return !isRestrictedOwner || currentOwner.permissions.includes(p);
+  }
   const go = (p) => {
     const ok = n2ok(p) || allowedKeys.includes(p);
     setPage(ok ? p : (allowedKeys[0] || "dashboard"));
     setNavOpen(false);
   };
 
-  const roleLabel = isOwner ? "رئيس الموقع — تحكم كامل"
+  const roleLabel = isOwner ? `${currentOwner?.name || "رئيس الموقع"} — ${isRestrictedOwner ? "صلاحيات محددة" : "تحكم كامل"}`
     : `${currentUser?.username}${readOnly ? " (قراءة فقط)" : " (يقدر يعدّل)"}`;
 
   return (
@@ -3204,25 +3829,30 @@ function App() {
           {safePage === "dashboard" && <Dashboard inventory={inventory} data={data} go={go} readOnly={readOnly} onPrint={() => triggerPrint("dashboard")} isOwner={isOwner} />}
           {safePage === "tasks" && <TasksPage data={data} setData={setData} notify={notify} isOwner={isOwner} currentUser={currentUser} />}
           {safePage === "items" && <ItemsPage data={data} setData={setData} notify={notify} readOnly={readOnly} onPrint={() => triggerPrint("items")} systemNotify={systemNotify} currentUser={currentUser} isOwner={isOwner} inventory={inventory} />}
-          {safePage === "inventory" && <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} currentUser={currentUser} isOwner={isOwner} />}
+          {safePage === "inventory" && <InventoryPage inventory={inventory} itemGroups={data.itemGroups} branches={data.branches} onPrint={() => triggerPrint("inventory")} currentUser={currentUser} isOwner={isOwner} />}
           {safePage === "barcodes" && <BarcodesPage data={data} setData={setData} notify={notify} readOnly={readOnly} />}
-          {safePage === "audit" && <AuditPage log={auditLog} />}
+          {safePage === "audit" && <AuditPage log={auditLog} isOwner={isOwner} currentUser={currentUser} />}
+          {safePage === "owners" && isOwner && <OwnersPage data={data} setData={setData} notify={notify} currentOwnerId={session.ownerId} />}
           {safePage === "users" && isOwner && <UsersPage data={data} setData={setData} notify={notify} />}
           {safePage === "groups" && isOwner && <GroupsPage data={data} setData={setData} notify={notify} />}
           {safePage === "branches" && isOwner && <BranchesPage data={data} setData={setData} notify={notify} />}
+          {safePage === "reports" && <ReportsPage data={data} inventory={inventory} auditLog={auditLog} />}
         </main>
       </div>
 
       {showPwModal && (
         <ChangeOwnerPasswordModal
-          currentPassword={data.ownerPassword}
-          currentRecoveryQuestion={data.ownerRecoveryQuestion}
-          currentRecoveryAnswer={data.ownerRecoveryAnswer}
+          owner={(data.owners || []).find((o) => o.id === session.ownerId)}
           notify={notify}
           onClose={() => setShowPwModal(false)}
           onSave={({ password, recoveryQuestion, recoveryAnswer }) => {
-            setData({ ...data, ownerPassword: password, ownerRecoveryQuestion: recoveryQuestion, ownerRecoveryAnswer: recoveryAnswer });
-            notify("تم تغيير كلمة مرور رئيس الموقع");
+            setData({
+              ...data,
+              owners: (data.owners || []).map((o) =>
+                o.id === session.ownerId ? { ...o, password, recoveryQuestion, recoveryAnswer } : o
+              ),
+            });
+            notify("تم تغيير كلمة المرور");
           }}
         />
       )}
@@ -3652,8 +4282,19 @@ function FontStyles() {
       .quick-log-btn-in:hover { background: var(--green); color: #fff; }
       .quick-log-btn-out { background: var(--red-bg); color: var(--red); }
       .quick-log-btn-out:hover { background: var(--red); color: #fff; }
+      .qty-stepper { display: flex; align-items: center; gap: 2px; }
+      .qty-stepper-btn {
+        display: flex; align-items: center; justify-content: center;
+        width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--line);
+        background: var(--surface); color: var(--ink-soft); cursor: pointer; flex: none;
+        transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      }
+      .qty-stepper-btn:hover { background: var(--navy); border-color: var(--navy); color: #fff; }
+      .qty-stepper .quick-log-qty { width: 56px; }
       @media (max-width: 520px) {
         .quick-log-qty { width: 56px; }
+        .qty-stepper .quick-log-qty { width: 44px; }
+        .qty-stepper-btn { width: 22px; height: 22px; }
       }
 
       /* ---------- BUTTONS ---------- */
@@ -3701,7 +4342,25 @@ function FontStyles() {
       .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
       .form-grid-move { grid-template-columns: 1fr 1fr 1fr; }
       .field { display: flex; flex-direction: column; gap: 6px; position: relative; }
+      .field-full { grid-column: 1 / -1; }
       .field-label { font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+      .perm-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+      .perm-toolbar-btn {
+        font-size: 11.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line);
+        background: var(--surface); color: var(--ink-soft); cursor: pointer;
+      }
+      .perm-toolbar-btn:hover { background: var(--kraft); }
+      .perm-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+      .perm-check {
+        display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 9px;
+        border: 1px solid var(--line); background: var(--surface); font-size: 12.5px; cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      .perm-check input { accent-color: var(--navy); }
+      .perm-check-active { border-color: var(--navy); background: var(--navy-bg, var(--kraft)); }
+      @media (max-width: 520px) {
+        .perm-grid { grid-template-columns: 1fr; }
+      }
       .scan-label { display: inline-flex; align-items: center; gap: 5px; }
       .scan-hint {
         font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 600; color: var(--green);
