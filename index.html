@@ -220,6 +220,10 @@ const DEFAULT_ITEM_GROUPS = [
   { id: "grp-cleaning", name: "منظفات" },
 ];
 
+// الفروع/المواقع — تُستخدم لحصر كل صنف بفرع معيّن، وربط منظم بفرع محدد
+// حتى ما يشوف/يعدّل إلا مخزون فرعه (رئيس الموقع يشوف كل الفروع دائماً)
+const DEFAULT_BRANCHES = [{ id: "br-main", name: "الفرع الرئيسي" }];
+
 // اقتراح إيموجي تلقائي حسب اسم مجموعة الصنف — مجرد اقتراح، يقدر المستخدم يغيّره
 const GROUP_EMOJI_HINTS = [
   { match: /بلاستيك/, emoji: "🧴" },
@@ -242,6 +246,25 @@ function genId(prefix) {
   return prefix + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+// تطبيع نص عربي للبحث المرن: يوحّد الهمزات (أ إ آ ا)، الياء/الألف المقصورة
+// (ي ى)، التاء المربوطة/الهاء (ة ه)، يشيل التشكيل والتطويل، ويطبّع الأرقام
+// العربية للإنجليزية — حتى البحث يلقى النتيجة رغم فروقات الكتابة الشائعة.
+function normalizeAr(str) {
+  return String(str || "")
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, "") // تشكيل + تطويل
+    .replace(/[إأآا]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .toLowerCase()
+    .trim();
+}
+// يتحقق أن نص المصدر يحتوي على نص البحث بعد تطبيع الاثنين
+function fuzzyIncludes(source, query) {
+  if (!query) return true;
+  return normalizeAr(source).includes(normalizeAr(query));
+}
+
 // يضمن وجود إعدادات الحساب/المستخدمين/المجموعات حتى لو كانت بيانات
 // المستودع قديمة (محفوظة قبل إضافة هذه الميزة) دون المساس ببيانات الجرد
 function withDefaults(d) {
@@ -251,8 +274,10 @@ function withDefaults(d) {
     ownerRecoveryQuestion: d.ownerRecoveryQuestion || "",
     ownerRecoveryAnswer: d.ownerRecoveryAnswer || "",
     itemGroups: Array.isArray(d.itemGroups) && d.itemGroups.length ? d.itemGroups : DEFAULT_ITEM_GROUPS,
-    users: Array.isArray(d.users) ? d.users.map((u) => ({ canEdit: true, ...u })) : [],
+    users: Array.isArray(d.users) ? d.users.map((u) => ({ canEdit: true, branch: "", ...u })) : [],
     tasks: Array.isArray(d.tasks) ? d.tasks : [],
+    branches: Array.isArray(d.branches) && d.branches.length ? d.branches : DEFAULT_BRANCHES,
+    auditLog: Array.isArray(d.auditLog) ? d.auditLog : [],
   };
 }
 
@@ -324,6 +349,7 @@ function parseCSV(text) {
 /* ------------------------------------------------------------------ */
 
 const STORE_KEY = "warehouse-data-v1";
+const AUDIT_KEY = "warehouse-audit-log-v1";
 // Data now lives in Supabase and syncs in real time across devices
 // (laptop, phone, tablet) via window.subscribeStorage — see the Supabase layer above.
 
@@ -336,6 +362,11 @@ function useStore(onRemoteUpdate) {
   // نتذكّر آخر نسخة كتبناها نحن بأنفسنا، حتى نتجاهل صداها القادم عبر
   // Realtime (لأن Supabase يرسل الحدث للجهاز المُرسِل نفسه أيضاً)
   const lastLocalWriteRef = React.useRef(null);
+  // كاش محلي لآخر نسخة بيانات وصلت بنجاح من الخادم — يُستخدم فقط عند
+  // انقطاع الاتصال لعرض آخر بيانات معروفة بدل الرجوع لبيانات افتراضية
+  // فارغة (وهو خطأ كان موجوداً سابقاً: أي انقطاع بالفتح الأول كان يمسح
+  // شكل البيانات ويستبدلها بعيّنة تجريبية).
+  const READ_CACHE_KEY = "warehouse-read-cache-v1";
 
   useEffect(() => {
     let cancelled = false;
@@ -347,6 +378,7 @@ function useStore(onRemoteUpdate) {
           if (res?.value) {
             dataRef.current = withDefaults(JSON.parse(res.value));
             setData(dataRef.current);
+            try { localStorage.setItem(READ_CACHE_KEY, res.value); } catch {}
           } else {
             const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
             dataRef.current = seed;
@@ -360,9 +392,15 @@ function useStore(onRemoteUpdate) {
         }
       } catch {
         if (!cancelled) {
-          const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
-          dataRef.current = seed;
-          setData(seed);
+          // لا يوجد اتصال: جرّب آخر نسخة محفوظة محلياً قبل اللجوء لبيانات تجريبية
+          let cached = null;
+          try {
+            const raw = localStorage.getItem(READ_CACHE_KEY);
+            if (raw) cached = withDefaults(JSON.parse(raw));
+          } catch {}
+          const fallback = cached || withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
+          dataRef.current = fallback;
+          setData(fallback);
           setOnline(false);
         }
       }
@@ -380,6 +418,7 @@ function useStore(onRemoteUpdate) {
             setData(next);
             setOnline(true);
             setLastSynced(Date.now());
+            try { localStorage.setItem(READ_CACHE_KEY, rawValue); } catch {}
             onRemoteUpdate?.();
           } catch {}
         });
@@ -400,7 +439,7 @@ function useStore(onRemoteUpdate) {
       await window.storage?.set(STORE_KEY, serialized, false);
       setOnline(true);
       setLastSynced(Date.now());
-      try { localStorage.removeItem(OFFLINE_KEY); } catch {}
+      try { localStorage.removeItem(OFFLINE_KEY); localStorage.setItem(READ_CACHE_KEY, serialized); } catch {}
     } catch {
       // لا يوجد اتصال بالإنترنت: نحفظ التعديل محلياً وننتظر عودة الاتصال
       setOnline(false);
@@ -559,6 +598,43 @@ function downloadCSV(filename, rows, headers) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/* ------------------------------------------------------------------ */
+/*  نسخة احتياطية كاملة (JSON) — تشمل كل البيانات (أصناف، حركات،         */
+/*  مستخدمين، مجموعات، فروع، مهام) بخلاف تصدير CSV الذي يغطي جزءاً فقط.  */
+/*  ملاحظة: هذا تصدير يدوي بضغطة زر؛ نسخ احتياطي مجدوَل تلقائياً كل      */
+/*  أسبوع (مثلاً) يحتاج Supabase Edge Function + Cron Job من لوحة        */
+/*  تحكم Supabase مباشرة، لأنه يجب أن يعمل حتى لو الموقع مسكّر.          */
+/* ------------------------------------------------------------------ */
+
+const LAST_BACKUP_KEY = "warehouse-last-full-backup";
+
+function markBackupDone() {
+  try { localStorage.setItem(LAST_BACKUP_KEY, String(Date.now())); } catch {}
+}
+function daysSinceBackup() {
+  try {
+    const raw = localStorage.getItem(LAST_BACKUP_KEY);
+    if (!raw) return Infinity;
+    return (Date.now() - Number(raw)) / (24 * 3600 * 1000);
+  } catch { return Infinity; }
+}
+function downloadFullBackup(data) {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    items: data.items, incoming: data.incoming, outgoing: data.outgoing,
+    barcodes: data.barcodes, users: data.users, itemGroups: data.itemGroups,
+    branches: data.branches, tasks: data.tasks,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `نسخة_احتياطية_${todayISO()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  markBackupDone();
 }
 
 /* ------------------------------------------------------------------ */
@@ -806,10 +882,16 @@ function Field({ label, children }) {
 /*  DASHBOARD                                                          */
 /* ------------------------------------------------------------------ */
 
-function Dashboard({ inventory, data, go, readOnly, onPrint }) {
+function Dashboard({ inventory, data, go, readOnly, onPrint, isOwner }) {
   const total = inventory.length;
   const low = inventory.filter((i) => i.status === "low").length;
   const empty = inventory.filter((i) => i.status === "empty").length;
+  // تذكير بأخذ نسخة احتياطية كاملة إذا مرّ أكثر من 7 أيام على آخر نسخة
+  // (أو ما أُخذت نسخة أبداً) — رئيس الموقع فقط، حتى لا يُزعج بقية المنظمين
+  const [backupStale, setBackupStale] = useState(false);
+  useEffect(() => {
+    if (isOwner) setBackupStale(daysSinceBackup() > 7);
+  }, [isOwner]);
   const available = total - low - empty;
   const critical = useMemo(
     () => inventory.filter((i) => i.status !== "available").sort((a, b) => a.balance - b.balance).slice(0, 12),
@@ -876,6 +958,19 @@ function Dashboard({ inventory, data, go, readOnly, onPrint }) {
         eyebrow="نظرة عامة" title="لوحة التحكم" subtitle="ملخص سريع لحالة المستودع اليوم"
         action={<button className="btn-ghost" onClick={() => (onPrint ? onPrint() : window.print())}><Download size={15} /> طباعة / PDF</button>}
       />
+
+      {backupStale && (
+        <div className="alert-banner" style={{ background: "var(--amber-bg)", color: "var(--amber)", borderColor: "var(--amber)" }}>
+          <Download size={18} />
+          <div className="alert-banner-text">
+            <strong>ما أُخذت نسخة احتياطية كاملة من المستودع منذ فترة.</strong>{" "}
+            خذ نسخة الآن (ملف JSON يحتوي كل البيانات) تحسّباً لأي خطأ أو حذف غير مقصود.
+          </div>
+          <button className="btn-ghost alert-banner-btn" onClick={() => { downloadFullBackup(data); setBackupStale(false); }}>
+            <Download size={14} /> نسخة احتياطية الآن
+          </button>
+        </div>
+      )}
 
       {critical.length > 0 && (
         <div className="alert-banner">
@@ -988,17 +1083,61 @@ function PageHeader({ eyebrow, title, subtitle, action }) {
 /*  ITEMS PAGE                                                         */
 /* ------------------------------------------------------------------ */
 
-function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify }) {
+function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, currentUser, isOwner, inventory }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null); // { mode: 'add'|'edit', item }
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
 
-  const filtered = data.items.filter((it) =>
-    (it.name + it.code + it.category).toLowerCase().includes(query.toLowerCase())
+  // وضع التسجيل السريع: يخلي المستخدم يسجّل دخول/خروج البضاعة مباشرة من
+  // قائمة الأغراض نفسها بضغطة وحدة، بدل ما يروح لصفحة منفصلة
+  const [quickMode, setQuickMode] = useState("off"); // "off" | "in" | "out"
+  const [qtyDrafts, setQtyDrafts] = useState({}); // { [code]: "3" }
+  const balanceFor = (code) => inventory?.find((i) => i.code === code)?.balance ?? 0;
+
+  const logQuick = (item) => {
+    const raw = qtyDrafts[item.code];
+    const qty = Number(raw);
+    if (!raw || !qty || qty <= 0) {
+      notify("أدخل كمية صحيحة أكبر من صفر", "error");
+      return;
+    }
+    const isOut = quickMode === "out";
+    if (isOut) {
+      const bal = balanceFor(item.code);
+      if (qty > bal) {
+        notify(`الكمية غير كافية — المتوفر حالياً ${bal} فقط`, "error");
+        return;
+      }
+    }
+    const entry = {
+      id: (isOut ? "out" : "in") + "-" + Date.now(), code: item.code, name: item.name, date: todayISO(), qty,
+      notes: "تسجيل سريع من قائمة الأغراض",
+      ...(isOut ? { returnType: "consume", returned: false } : {}),
+    };
+    const key = isOut ? "outgoing" : "incoming";
+    setData({ ...data, [key]: [entry, ...data[key]] });
+    setQtyDrafts((d) => ({ ...d, [item.code]: "" }));
+    notify(isOut ? `تم تسجيل خروج ${qty} من «${item.name}»` : `تم تسجيل دخول ${qty} من «${item.name}»`);
+    if (systemNotify) {
+      systemNotify({
+        eventLevel: "all",
+        title: isOut ? "المستودع — تسجيل خروج" : "المستودع — تسجيل دخول",
+        body: `${item.name} — الكمية ${qty}`,
+        tag: "warehouse-movement",
+      });
+    }
+  };
+
+  // منظم مقيّد بفرع معيّن يشوف بس أصناف فرعه؛ رئيس الموقع يشوف كل شيء دائماً
+  const myBranch = !isOwner && currentUser?.restrictedBranch;
+  const branchItems = myBranch ? data.items.filter((i) => i.branch === myBranch) : data.items;
+
+  const filtered = branchItems.filter((it) =>
+    fuzzyIncludes(it.name + it.code + it.category, query)
   );
 
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "" } });
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -1062,6 +1201,22 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify }) {
             <Camera size={15} />
           </button>
         </div>
+        {!readOnly && (
+          <div className="filter-chips">
+            <button
+              className={`chip quick-chip-in ${quickMode === "in" ? "chip-active" : ""}`}
+              onClick={() => setQuickMode((m) => (m === "in" ? "off" : "in"))}
+            >
+              <ArrowDownToLine size={13} /> وضع الإدخال
+            </button>
+            <button
+              className={`chip quick-chip-out ${quickMode === "out" ? "chip-active" : ""}`}
+              onClick={() => setQuickMode((m) => (m === "out" ? "off" : "out"))}
+            >
+              <ArrowUpFromLine size={13} /> وضع الإخراج
+            </button>
+          </div>
+        )}
         <button className="btn-ghost" onClick={() => downloadCSV("قائمة_الاغراض.csv", data.items, ["code", "name", "category", "notes", "minQty"])}>
           <Download size={15} /> تصدير CSV
         </button>
@@ -1125,7 +1280,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify }) {
                   <th>الكود</th>
                   <th>اسم المنتج</th>
                   <th>الموقع / الفئة</th>
-                  <th>ملاحظات</th>
+                  {quickMode === "off" ? <th>ملاحظات</th> : <th>الرصيد الحالي</th>}
                   {!readOnly && <th></th>}
                 </tr>
               </thead>
@@ -1136,13 +1291,36 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify }) {
                     <td><CodeTag code={it.code} /></td>
                     <td className="cell-strong">{it.emoji ? `${it.emoji} ` : ""}{it.name}</td>
                     <td className="cell-muted"><MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}</td>
-                    <td className="cell-muted">{it.notes || "—"}</td>
+                    {quickMode === "off" ? (
+                      <td className="cell-muted">{it.notes || "—"}</td>
+                    ) : (
+                      <td className="cell-mono">{balanceFor(it.code)}</td>
+                    )}
                     {!readOnly && (
                       <td>
-                        <div className="row-actions">
-                          <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
-                          <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
-                        </div>
+                        {quickMode === "off" ? (
+                          <div className="row-actions">
+                            <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
+                            <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
+                          </div>
+                        ) : (
+                          <div className={`quick-log-row quick-log-${quickMode}`}>
+                            <input
+                              type="number" min="0" step="1" className="input mono quick-log-qty"
+                              placeholder="الكمية"
+                              value={qtyDrafts[it.code] || ""}
+                              onChange={(e) => setQtyDrafts((d) => ({ ...d, [it.code]: e.target.value }))}
+                              onKeyDown={(e) => { if (e.key === "Enter") logQuick(it); }}
+                            />
+                            <button
+                              className={`icon-btn quick-log-btn ${quickMode === "in" ? "quick-log-btn-in" : "quick-log-btn-out"}`}
+                              title={quickMode === "in" ? "تسجيل دخول" : "تسجيل خروج"}
+                              onClick={() => logQuick(it)}
+                            >
+                              {quickMode === "in" ? <ArrowDownToLine size={17} /> : <ArrowUpFromLine size={17} />}
+                            </button>
+                          </div>
+                        )}
                       </td>
                     )}
                   </tr>
@@ -1155,7 +1333,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify }) {
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
-          <ItemForm item={modal.item} itemGroups={data.itemGroups} onCancel={() => setModal(null)} onSave={save} />
+          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -1220,7 +1398,7 @@ function EmojiPicker({ value, onChange }) {
   );
 }
 
-function ItemForm({ item, itemGroups, onCancel, onSave }) {
+function ItemForm({ item, itemGroups, branches, onCancel, onSave }) {
   const [form, setForm] = useState(item);
   const [cameraOpen, setCameraOpen] = useState(false);
   const codeRef = React.useRef(null);
@@ -1280,6 +1458,12 @@ function ItemForm({ item, itemGroups, onCancel, onSave }) {
       <Field label="الموقع / الفئة">
         <input className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="مثال: الدولاب البني 1" />
       </Field>
+      <Field label="الفرع">
+        <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
+          <option value="">بدون فرع محدد</option>
+          {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </Field>
       <Field label="ملاحظات">
         <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" />
       </Field>
@@ -1307,323 +1491,10 @@ function ItemForm({ item, itemGroups, onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  MOVEMENT FORM (shared shape for incoming / outgoing)               */
-/* ------------------------------------------------------------------ */
-
-function MovementPage({ kind, data, setData, notify, readOnly, systemNotify }) {
-  const isOut = kind === "out";
-  const rows = isOut ? data.outgoing : data.incoming;
-  const [form, setForm] = useState({ code: "", name: "", date: todayISO(), qty: "", notes: "", returnType: "consume" });
-  const [loanFilter, setLoanFilter] = useState(false); // فلتر: أظهر فقط العهد التي لم ترجع بعد
-  const [suggestOpen, setSuggestOpen] = useState(false);
-  const [scanFlash, setScanFlash] = useState(false);
-  const [cameraOpen, setCameraOpen] = useState(false);
-
-  const codeInputRef = React.useRef(null);
-  const qtyInputRef = React.useRef(null);
-
-  const inventory = useMemo(() => computeInventory(data), [data]);
-
-  // Keep the scanner "aimed" at the code field — a handheld reader types into
-  // whatever input currently has focus, so refocus it after every reset.
-  useEffect(() => {
-    codeInputRef.current?.focus();
-  }, []);
-
-  const suggestions = form.code
-    ? data.items.filter((i) => i.code.includes(form.code) || i.name.includes(form.code)).slice(0, 6)
-    : [];
-
-  const pick = (item, focusQty = true) => {
-    setForm((f) => ({ ...f, code: item.code, name: item.name }));
-    setSuggestOpen(false);
-    if (focusQty) setTimeout(() => qtyInputRef.current?.focus(), 0);
-  };
-
-  const balanceFor = (code) => inventory.find((i) => i.code === code)?.balance ?? null;
-
-  // Shared resolution logic used by both the handheld-scanner (keyboard Enter)
-  // path and the phone-camera live detection path.
-  const resolveScannedCode = (raw) => {
-    const clean = String(raw).trim();
-    if (!clean) return;
-    const exact = data.items.find((i) => i.code === clean);
-    if (exact) {
-      setScanFlash(true);
-      setTimeout(() => setScanFlash(false), 350);
-      pick(exact);
-      return;
-    }
-    const partial = data.items.filter((i) => i.code.includes(clean) || i.name.includes(clean));
-    if (partial.length === 1) {
-      pick(partial[0]);
-      return;
-    }
-    setForm((f) => ({ ...f, code: clean, name: "" }));
-    notify("لم يتم التعرف على هذا الكود — تأكد من تسجيله في قائمة الأغراض", "error");
-    setTimeout(() => codeInputRef.current?.select(), 0);
-  };
-
-  // Handheld barcode readers act like a keyboard: they "type" every digit of
-  // the code within milliseconds, then send an Enter keystroke. We resolve
-  // the item as soon as Enter arrives, so scanning needs zero clicks.
-  const handleCodeKeyDown = (e) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    resolveScannedCode(form.code);
-  };
-
-  const handleCameraDetect = (value) => {
-    setCameraOpen(false);
-    resolveScannedCode(value);
-  };
-
-  const handleQtyKeyDown = (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      submit();
-    }
-  };
-
-  const submit = () => {
-    const item = data.items.find((i) => i.code === form.code);
-    if (!item) {
-      notify("هذا الكود غير موجود في قائمة الأغراض", "error");
-      return;
-    }
-    const qty = Number(form.qty);
-    if (!qty || qty <= 0) {
-      notify("أدخل كمية صحيحة أكبر من صفر", "error");
-      return;
-    }
-    if (isOut) {
-      const bal = balanceFor(form.code) ?? 0;
-      if (qty > bal) {
-        notify(`الكمية غير كافية — المتوفر حالياً ${bal} فقط`, "error");
-        return;
-      }
-    }
-    const entry = {
-      id: kind + "-" + Date.now(), code: form.code, name: item.name, date: form.date || todayISO(), qty, notes: form.notes,
-      ...(isOut ? { returnType: form.returnType || "consume", returned: false } : {}),
-    };
-    const key = isOut ? "outgoing" : "incoming";
-    setData({ ...data, [key]: [entry, ...rows] });
-    setForm({ code: "", name: "", date: todayISO(), qty: "", notes: "", returnType: "consume" });
-    notify(isOut ? "تم تسجيل خروج البضاعة" : "تم تسجيل دخول البضاعة");
-    if (systemNotify) {
-      systemNotify({
-        eventLevel: "all",
-        title: isOut ? "المستودع — تسجيل خروج" : "المستودع — تسجيل دخول",
-        body: `${item.name} — الكمية ${qty}${isOut && form.returnType === "loan" ? " (عهدة، سترجع)" : ""}`,
-        tag: "warehouse-movement",
-      });
-    }
-    setTimeout(() => codeInputRef.current?.focus(), 0);
-  };
-
-  // إرجاع عهدة: يسجّل حركة "دخول" تلقائية بنفس الكود والكمية، ويعلّم حركة
-  // الخروج الأصلية على أنها أُرجعت — دون التأثير على أي حركة أخرى.
-  const markReturned = (row) => {
-    const inEntry = {
-      id: "in-" + Date.now(), code: row.code, name: row.name, date: todayISO(),
-      qty: row.qty, notes: `إرجاع عهدة (من حركة خروج بتاريخ ${fmtDate(row.date)})`,
-    };
-    setData({
-      ...data,
-      incoming: [inEntry, ...data.incoming],
-      outgoing: data.outgoing.map((r) => (r.id === row.id ? { ...r, returned: true } : r)),
-    });
-    notify(`تم تسجيل إرجاع «${row.name}»`);
-  };
-
-  const sorted = [...rows].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  const outstandingLoans = isOut ? rows.filter((r) => r.returnType === "loan" && !r.returned).length : 0;
-  const displayRows = isOut && loanFilter ? sorted.filter((r) => r.returnType === "loan" && !r.returned) : sorted;
-  const currentBalance = form.code ? balanceFor(form.code) : null;
-  const insufficient = isOut && form.code && Number(form.qty) > (currentBalance ?? 0);
-  const notFound = form.code && !data.items.some((i) => i.code === form.code);
-
-  return (
-    <div className="page">
-      <PageHeader
-        eyebrow={isOut ? "الحركة" : "الحركة"}
-        title={isOut ? "تسجيل الخارج" : "تسجيل الداخل"}
-        subtitle={isOut ? "إخراج بضاعة من المستودع" : "استلام بضاعة جديدة إلى المستودع"}
-      />
-
-      {readOnly ? (
-        <div className="alert alert-info" style={{ margin: "0 0 16px" }}>
-          <ShieldAlert size={15} /> وضع الزائر: يمكنك تصفّح السجل السابق فقط، ولا يمكنك تسجيل حركات جديدة.
-        </div>
-      ) : (
-      <div className="panel form-panel">
-        <div className="form-grid form-grid-move">
-          <Field label={<span className="scan-label"><ScanLine size={13} /> كود المنتج <span className="scan-hint">جاهز للمسح</span></span>}>
-            <div className="autocomplete">
-              <div className="scan-input-row">
-                <input
-                  ref={codeInputRef}
-                  className={`input mono scan-input ${scanFlash ? "scan-flash" : ""}`}
-                  value={form.code}
-                  onChange={(e) => { setForm({ ...form, code: e.target.value, name: "" }); setSuggestOpen(true); }}
-                  onFocus={() => setSuggestOpen(true)}
-                  onKeyDown={handleCodeKeyDown}
-                  placeholder="وجّه قارئ الباركود إلى هنا وامسح…"
-                  autoComplete="off"
-                />
-                <ScanCameraButton onClick={() => setCameraOpen(true)} />
-              </div>
-              {suggestOpen && suggestions.length > 0 && (
-                <div className="suggest-list">
-                  {suggestions.map((s) => (
-                    <button key={s.code} className="suggest-item" onClick={() => pick(s)}>
-                      <CodeTag code={s.code} />
-                      <span>{s.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </Field>
-          <Field label="اسم المنتج">
-            <input className="input" value={form.name} disabled placeholder="يُعبأ تلقائياً بعد المسح" />
-          </Field>
-          <Field label="التاريخ">
-            <input className="input mono" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
-          </Field>
-          <Field label="الكمية">
-            <input
-              ref={qtyInputRef}
-              className="input mono"
-              type="number"
-              step="0.5"
-              min="0"
-              value={form.qty}
-              onChange={(e) => setForm({ ...form, qty: e.target.value })}
-              onKeyDown={handleQtyKeyDown}
-              placeholder="0 — ثم Enter للتسجيل"
-            />
-          </Field>
-          <Field label="ملاحظات">
-            <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" />
-          </Field>
-          {isOut && (
-            <Field label="نوع الخروج">
-              <select className="input" value={form.returnType} onChange={(e) => setForm({ ...form, returnType: e.target.value })}>
-                <option value="consume">استهلاك — لن يرجع</option>
-                <option value="loan">عهدة / إعارة — سيرجع لاحقاً</option>
-              </select>
-            </Field>
-          )}
-        </div>
-
-        {notFound && (
-          <div className="alert alert-error"><AlertTriangle size={15} /> هذا الكود غير مسجّل في قائمة الأغراض — أضِفه أولاً من صفحة «قائمة الأغراض».</div>
-        )}
-        {!notFound && isOut && form.code && (
-          <div className={`alert ${insufficient ? "alert-error" : "alert-info"}`}>
-            {insufficient ? <AlertTriangle size={15} /> : <Boxes size={15} />}
-            الكمية المتوفرة حالياً من «{form.name || form.code}»: <b className="mono">{currentBalance}</b>
-            {insufficient && " — الكمية المطلوبة أكبر من المتوفر"}
-          </div>
-        )}
-
-        <div className="form-actions">
-          <button className={isOut ? "btn-danger" : "btn-primary"} onClick={submit}>
-            {isOut ? <ArrowUpFromLine size={16} /> : <ArrowDownToLine size={16} />}
-            {isOut ? "تسجيل الخروج" : "تسجيل الدخول"}
-          </button>
-        </div>
-      </div>
-      )}
-
-      <div className="panel">
-        <div className="panel-head">
-          <span className="panel-title">السجل السابق</span>
-          <span className="panel-sub">{rows.length} حركة مسجّلة{isOut && outstandingLoans > 0 ? ` — ${outstandingLoans} عهدة لم ترجع بعد` : ""}</span>
-        </div>
-        {isOut && outstandingLoans > 0 && (
-          <div className="filter-chips" style={{ padding: "0 16px 12px" }}>
-            <button className={`chip ${loanFilter ? "chip-active" : ""}`} onClick={() => setLoanFilter((v) => !v)}>
-              <RotateCcw size={13} style={{ marginLeft: 4, verticalAlign: "-2px" }} />
-              عهد لم ترجع بعد فقط ({outstandingLoans})
-            </button>
-          </div>
-        )}
-        {sorted.length === 0 ? (
-          <EmptyState icon={isOut ? ArrowUpFromLine : ArrowDownToLine} title="لا توجد حركات مسجّلة بعد" />
-        ) : displayRows.length === 0 ? (
-          <EmptyState icon={RotateCcw} title="لا توجد عهد قائمة حالياً" hint="كل ما تم إخراجه إما استهلاك أو تم إرجاعه" />
-        ) : (
-          <div className="table-wrap">
-            <table className="ledger-table">
-              <thead>
-                <tr>
-                  <th>الكود</th>
-                  <th>اسم المنتج</th>
-                  <th>التاريخ</th>
-                  <th>الكمية</th>
-                  {isOut && <th>النوع</th>}
-                  <th>ملاحظات</th>
-                  {isOut && !readOnly && <th></th>}
-                </tr>
-              </thead>
-              <tbody>
-                {displayRows.map((r) => (
-                  <tr key={r.id}>
-                    <td><CodeTag code={r.code} /></td>
-                    <td className="cell-strong">{r.name}</td>
-                    <td className="cell-mono">{fmtDate(r.date)}</td>
-                    <td className="cell-mono">{r.qty}</td>
-                    {isOut && (
-                      <td>
-                        {r.returnType === "loan" ? (
-                          <span
-                            className="stamp-badge"
-                            style={{
-                              color: r.returned ? "var(--green)" : "var(--amber)",
-                              borderColor: r.returned ? "var(--green)" : "var(--amber)",
-                              background: r.returned ? "var(--green-bg)" : "var(--amber-bg)",
-                            }}
-                          >
-                            {r.returned ? "عهدة — رجعت" : "عهدة — لم ترجع"}
-                          </span>
-                        ) : (
-                          <span className="cell-muted">استهلاك</span>
-                        )}
-                      </td>
-                    )}
-                    <td className="cell-muted">{r.notes || "—"}</td>
-                    {isOut && !readOnly && (
-                      <td>
-                        {r.returnType === "loan" && !r.returned && (
-                          <button className="btn-ghost" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => markReturned(r)}>
-                            <RotateCcw size={13} /> تسجيل إرجاع
-                          </button>
-                        )}
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {cameraOpen && (
-        <BarcodeCameraModal onDetect={handleCameraDetect} onClose={() => setCameraOpen(false)} />
-      )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /*  INVENTORY PAGE                                                     */
 /* ------------------------------------------------------------------ */
 
-function InventoryPage({ inventory, itemGroups, onPrint }) {
+function InventoryPage({ inventory, itemGroups, onPrint, currentUser, isOwner }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
@@ -1635,13 +1506,17 @@ function InventoryPage({ inventory, itemGroups, onPrint }) {
 
   const groupName = (id) => itemGroups.find((g) => g.id === id)?.name || "";
 
+  // منظم مقيّد بفرع معيّن يشوف بس مخزون فرعه؛ رئيس الموقع يشوف كل شيء دائماً
+  const myBranch = !isOwner && currentUser?.restrictedBranch;
+  const scopedInventory = myBranch ? inventory.filter((i) => i.branch === myBranch) : inventory;
+
   const locations = useMemo(
-    () => [...new Set(inventory.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar")),
-    [inventory]
+    () => [...new Set(scopedInventory.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar")),
+    [scopedInventory]
   );
 
-  const filtered = inventory
-    .filter((i) => (i.name + i.code + i.category).toLowerCase().includes(query.toLowerCase()))
+  const filtered = scopedInventory
+    .filter((i) => fuzzyIncludes(i.name + i.code + i.category, query))
     .filter((i) => statusFilter === "all" || i.status === statusFilter)
     .filter((i) => locationFilter === "all" || i.category === locationFilter)
     .filter((i) => groupFilter === "all" || i.group === groupFilter)
@@ -1887,12 +1762,14 @@ function BarcodeForm({ row, onCancel, onSave }) {
 /*  GLOBAL SEARCH                                                      */
 /* ------------------------------------------------------------------ */
 
-function GlobalSearch({ data, inventory, go }) {
+function GlobalSearch({ data, inventory, go, currentUser, isOwner }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+  const myBranch = !isOwner && currentUser?.restrictedBranch;
+  const scoped = myBranch ? inventory.filter((i) => i.branch === myBranch) : inventory;
   const results = q.length > 1
-    ? inventory.filter((i) => (i.name + i.code).toLowerCase().includes(q.toLowerCase())).slice(0, 6)
+    ? scoped.filter((i) => fuzzyIncludes(i.name + i.code, q)).slice(0, 6)
     : [];
 
   return (
@@ -1945,13 +1822,12 @@ const NAV = [
   { key: "dashboard", label: "لوحة التحكم", icon: LayoutGrid },
   { key: "tasks", label: "المهام", icon: ClipboardList },
   { key: "items", label: "قائمة الأغراض", icon: Package },
-  { key: "incoming", label: "تسجيل الداخل", icon: ArrowDownToLine },
-  { key: "outgoing", label: "تسجيل الخارج", icon: ArrowUpFromLine },
   { key: "inventory", label: "المخزون", icon: Boxes },
   { key: "barcodes", label: "باركودات غير معنونة", icon: Barcode },
   { key: "audit", label: "سجل النشاط", icon: Hash },
   { key: "users", label: "المستخدمون", icon: Users, ownerOnly: true },
   { key: "groups", label: "المجموعات", icon: Layers, ownerOnly: true },
+  { key: "branches", label: "الفروع", icon: MapPin, ownerOnly: true },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -1995,6 +1871,7 @@ function UsersPage({ data, setData, notify }) {
       username,
       password: form.password.trim(),
       canEdit: !!form.canEdit,
+      restrictedBranch: form.restrictedBranch || "",
       tempUntil,
       createdAt: form.createdAt || Date.now(),
     };
@@ -2025,7 +1902,7 @@ function UsersPage({ data, setData, notify }) {
           <div className="table-wrap">
             <table className="ledger-table">
               <thead>
-                <tr><th>اسم المستخدم</th><th>الصلاحية</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
+                <tr><th>اسم المستخدم</th><th>الصلاحية</th><th>الفرع</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
               </thead>
               <tbody>
                 {data.users.map((u) => {
@@ -2040,6 +1917,7 @@ function UsersPage({ data, setData, notify }) {
                           {u.canEdit ? "يقدر يعدّل" : "قراءة فقط"}
                         </span>
                       </td>
+                      <td className="cell-strong">{u.restrictedBranch ? (data.branches.find((b) => b.id === u.restrictedBranch)?.name || "—") : "كل الفروع"}</td>
                       <td className="cell-mono">{u.password}</td>
                       <td>
                         {u.tempUntil ? (
@@ -2072,7 +1950,7 @@ function UsersPage({ data, setData, notify }) {
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة مستخدم" : "تعديل المستخدم"} onClose={() => setModal(null)}>
-          <UserForm user={modal.user} onCancel={() => setModal(null)} onSave={save} />
+          <UserForm user={modal.user} branches={data.branches} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -2089,7 +1967,7 @@ function UsersPage({ data, setData, notify }) {
   );
 }
 
-function UserForm({ user, onCancel, onSave }) {
+function UserForm({ user, branches, onCancel, onSave }) {
   const [form, setForm] = useState(user);
   const [showPass, setShowPass] = useState(false);
 
@@ -2121,6 +1999,12 @@ function UserForm({ user, onCancel, onSave }) {
             <input type="radio" checked={!form.canEdit} onChange={() => setForm({ ...form, canEdit: false })} /> قراءة فقط
           </label>
         </div>
+      </Field>
+      <Field label="الفرع المخصص (اختياري)">
+        <select className="input" value={form.restrictedBranch || ""} onChange={(e) => setForm({ ...form, restrictedBranch: e.target.value })}>
+          <option value="">كل الفروع</option>
+          {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
       </Field>
       <Field label="نوع كلمة المرور">
         <div className="login-choices" style={{ gap: 6 }}>
@@ -2249,6 +2133,109 @@ function GroupForm({ group, onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  BRANCHES PAGE (site owner only) — تحصر مخزون/صلاحية كل منظم بفرعه   */
+/* ------------------------------------------------------------------ */
+
+function BranchesPage({ data, setData, notify }) {
+  const [modal, setModal] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const itemCountFor = (id) => data.items.filter((i) => i.branch === id).length;
+  const userCountFor = (id) => data.users.filter((u) => u.restrictedBranch === id).length;
+
+  const openAdd = () => setModal({ mode: "add", branch: { name: "" } });
+  const openEdit = (b) => setModal({ mode: "edit", branch: { ...b } });
+
+  const save = (form) => {
+    if (!form.name.trim()) { notify("اسم الفرع مطلوب", "error"); return; }
+    const record = { id: form.id || genId("br"), name: form.name.trim() };
+    const exists = data.branches.some((b) => b.id === record.id);
+    const branches = exists ? data.branches.map((b) => (b.id === record.id ? record : b)) : [...data.branches, record];
+    setData({ ...data, branches });
+    setModal(null);
+    notify(exists ? "تم تحديث الفرع" : "تمت إضافة الفرع");
+  };
+
+  const remove = (id) => {
+    // الأصناف والمستخدمون المرتبطون بهذا الفرع يرجعون لبدون فرع بدل ما يُحذفوا
+    const items = data.items.map((i) => (i.branch === id ? { ...i, branch: "" } : i));
+    const users = data.users.map((u) => (u.restrictedBranch === id ? { ...u, restrictedBranch: "" } : u));
+    setData({ ...data, branches: data.branches.filter((b) => b.id !== id), items, users });
+    setConfirmDelete(null);
+    notify("تم حذف الفرع");
+  };
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="مواقع المستودع" title="الفروع" subtitle="اربط كل صنف بفرعه، وقيّد كل منظم بفرع واحد فقط من صفحة المستخدمين"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة فرع</button>}
+      />
+      <div className="panel">
+        {data.branches.length === 0 ? (
+          <EmptyState icon={MapPin} title="لا توجد فروع بعد" hint="أضف فرعاً مثل «الفرع الرئيسي» أو «مستودع الرياض»" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead><tr><th>اسم الفرع</th><th>عدد الأصناف</th><th>عدد المنظمين المقيّدين فيه</th><th></th></tr></thead>
+              <tbody>
+                {data.branches.map((b) => (
+                  <tr key={b.id}>
+                    <td className="cell-strong"><MapPin size={13} style={{ marginLeft: 4, verticalAlign: "-2px" }} />{b.name}</td>
+                    <td className="cell-mono">{itemCountFor(b.id)}</td>
+                    <td className="cell-mono">{userCountFor(b.id)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="icon-btn" onClick={() => openEdit(b)}><Pencil size={15} /></button>
+                        <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(b)}><Trash2 size={15} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal title={modal.mode === "add" ? "إضافة فرع" : "تعديل الفرع"} onClose={() => setModal(null)}>
+          <BranchForm branch={modal.branch} onCancel={() => setModal(null)} onSave={save} />
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">هل تريد حذف فرع «{confirmDelete.name}»؟ الأصناف والمستخدمون المرتبطون به يرجعون بدون فرع محدد (رئيس الموقع يبقى يشوف كل شيء دائماً).</p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete.id)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function BranchForm({ branch, onCancel, onSave }) {
+  const [form, setForm] = useState(branch);
+  return (
+    <div className="form-grid">
+      <Field label="اسم الفرع">
+        <input
+          autoFocus className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+          placeholder="مثال: الفرع الرئيسي، مستودع جدة"
+        />
+      </Field>
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  ACCOUNT / PASSWORD MODAL (site owner)                             */
 /* ------------------------------------------------------------------ */
 
@@ -2300,7 +2287,7 @@ function ChangeOwnerPasswordModal({ currentPassword, currentRecoveryQuestion, cu
 }
 
 /* ------------------------------------------------------------------ */
-/*  TASKS PAGE — مهام العاملين بالمستودع                               */
+/*  TASKS PAGE — مهام المنظمين بالمستودع                               */
 /* ------------------------------------------------------------------ */
 
 function TaskForm({ users, onCancel, onSave }) {
@@ -2325,7 +2312,7 @@ function TaskForm({ users, onCancel, onSave }) {
       </Field>
       <Field label="تكليف">
         <select className="input" value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)}>
-          <option value="all">كل العاملين</option>
+          <option value="all">كل المنظمين</option>
           {users.map((u) => <option key={u.id} value={u.id}>{u.username}</option>)}
         </select>
       </Field>
@@ -2346,9 +2333,9 @@ function TasksPage({ data, setData, notify, isOwner, currentUser }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const tasks = data.tasks || [];
-  const userName = (id) => (id === "all" ? "كل العاملين" : data.users.find((u) => u.id === id)?.username || "مستخدم محذوف");
+  const userName = (id) => (id === "all" ? "كل المنظمين" : data.users.find((u) => u.id === id)?.username || "مستخدم محذوف");
 
-  // العامل يشوف بس المهام المكلّف فيها (له شخصياً أو لكل العاملين)؛
+  // المنظم يشوف بس المهام المكلّف فيها (له شخصياً أو لكل المنظمين)؛
   // رئيس الموقع يشوف كل المهام لإدارتها ومتابعتها.
   const visibleTasks = isOwner
     ? tasks
@@ -2398,7 +2385,7 @@ function TasksPage({ data, setData, notify, isOwner, currentUser }) {
       <PageHeader
         eyebrow="متابعة"
         title="المهام"
-        subtitle={isOwner ? "أنشئ مهام وكلّفها للعاملين — يشوفونها فور دخولهم للموقع" : "المهام المكلّف بها — علّم عليها أول ما تخلّصها"}
+        subtitle={isOwner ? "أنشئ مهام وكلّفها للمنظمين — يشوفونها فور دخولهم للموقع" : "المهام المكلّف بها — علّم عليها أول ما تخلّصها"}
         action={isOwner && (
           <button className="btn-primary" onClick={() => setShowAdd(true)}><Plus size={15} /> مهمة جديدة</button>
         )}
@@ -2464,7 +2451,7 @@ function TasksPage({ data, setData, notify, isOwner, currentUser }) {
   );
 }
 
-// نافذة "مهامك" — تظهر تلقائياً أول ما يدخل العامل للموقع لو عنده مهام معلّقة
+// نافذة "مهامك" — تظهر تلقائياً أول ما يدخل المنظم للموقع لو عنده مهام معلّقة
 function MyTasksModal({ tasks, onDone, onClose }) {
   return (
     <Modal title="مهامك اليوم" onClose={onClose}>
@@ -2495,28 +2482,92 @@ function MyTasksModal({ tasks, onDone, onClose }) {
   );
 }
 
+// يصنّف رسالة الحدث لنوع مرئي (أيقونة + لون) بالاعتماد على كلمات مفتاحية
+// شائعة بنصوص notify() بالموقع، بدون الحاجة لتعديل كل نقطة تستدعيها
+function classifyAuditEvent(msg) {
+  if (/حذف/.test(msg)) return { label: "حذف", tone: "red", Icon: Trash2 };
+  if (/تسجيل دخول/.test(msg)) return { label: "دخول بضاعة", tone: "green", Icon: ArrowDownToLine };
+  if (/تسجيل خروج/.test(msg)) return { label: "خروج بضاعة", tone: "red", Icon: ArrowUpFromLine };
+  if (/استيراد/.test(msg)) return { label: "استيراد", tone: "amber", Icon: Download };
+  if (/إضاف/.test(msg)) return { label: "إضافة", tone: "green", Icon: Plus };
+  if (/كلمة مرور/.test(msg)) return { label: "أمان", tone: "navy", Icon: KeyRound };
+  if (/الدخول بنجاح/.test(msg)) return { label: "دخول للنظام", tone: "navy", Icon: KeyRound };
+  if (/مهمة/.test(msg)) return { label: "مهمة", tone: "navy", Icon: ClipboardList };
+  if (/تحديث|حفظ التعديلات/.test(msg)) return { label: "تعديل", tone: "amber", Icon: Pencil };
+  return { label: "أخرى", tone: "navy", Icon: Clock };
+}
+
+// وقت نسبي تقريبي ("قبل 5 دقائق") — يبسّط قراءة السجل بدون ما نفقد
+// الوقت الدقيق (يبقى ظاهر كـ tooltip عند التمرير)
+function timeAgoAr(ts) {
+  const diff = Math.max(0, Date.now() - ts);
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "الآن";
+  if (min < 60) return `قبل ${min} دقيقة`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `قبل ${hr} ساعة`;
+  const day = Math.floor(hr / 24);
+  return `قبل ${day} يوم`;
+}
+
 function AuditPage({ log }) {
-  const rows = log.map((e) => ({ time: new Date(e.time).toLocaleString("ar-SA"), event: e.msg }));
+  const [query, setQuery] = useState("");
+  const [byFilter, setByFilter] = useState("all");
+
+  const actors = useMemo(() => [...new Set(log.map((e) => e.by || "—"))], [log]);
+
+  const filtered = log
+    .filter((e) => byFilter === "all" || (e.by || "—") === byFilter)
+    .filter((e) => fuzzyIncludes(e.msg + (e.by || ""), query));
+
+  const rows = filtered.map((e) => ({ time: new Date(e.time).toLocaleString("ar-SA"), by: e.by || "—", event: e.msg }));
+
   return (
     <div className="page">
       <PageHeader
-        eyebrow="تدقيق" title="سجل النشاط" subtitle="آخر العمليات التي جرت في هذه الجلسة على هذا الجهاز"
-        action={log.length > 0 && <button className="btn-ghost" onClick={() => downloadCSV("سجل_النشاط.csv", rows, ["time", "event"])}><Download size={15} /> تصدير CSV</button>}
+        eyebrow="تدقيق" title="سجل النشاط" subtitle="كل العمليات على المستودع من أي جهاز أو منظم — محفوظة بشكل دائم"
+        action={rows.length > 0 && <button className="btn-ghost" onClick={() => downloadCSV("سجل_النشاط.csv", rows, ["time", "by", "event"])}><Download size={15} /> تصدير CSV</button>}
       />
+
+      {log.length > 0 && (
+        <div className="toolbar">
+          <div className="search-box">
+            <Search size={16} />
+            <input placeholder="ابحث بالحدث أو الاسم…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
+          <select className="input" style={{ maxWidth: 200 }} value={byFilter} onChange={(e) => setByFilter(e.target.value)}>
+            <option value="all">كل المنظمين</option>
+            {actors.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+      )}
+
       <div className="panel">
         {log.length === 0 ? (
-          <EmptyState icon={Clock} title="لا يوجد نشاط مسجّل بعد" hint="سيظهر هنا كل إضافة أو تعديل أو حذف تقوم به" />
+          <EmptyState icon={Clock} title="لا يوجد نشاط مسجّل بعد" hint="سيظهر هنا كل إضافة أو تعديل أو حذف يقوم به أي منظم" />
+        ) : filtered.length === 0 ? (
+          <EmptyState icon={Search} title="لا نتائج مطابقة" hint="جرّب كلمة بحث أو فلتر مختلف" />
         ) : (
           <div className="table-wrap">
             <table className="ledger-table">
-              <thead><tr><th>الوقت</th><th>الحدث</th></tr></thead>
+              <thead><tr><th>النوع</th><th>الوقت</th><th>بواسطة</th><th>الحدث</th></tr></thead>
               <tbody>
-                {log.map((e, i) => (
-                  <tr key={i}>
-                    <td className="cell-mono">{new Date(e.time).toLocaleString("ar-SA")}</td>
-                    <td className="cell-strong">{e.msg}</td>
-                  </tr>
-                ))}
+                {filtered.map((e, i) => {
+                  const c = classifyAuditEvent(e.msg);
+                  return (
+                    <tr key={i}>
+                      <td>
+                        <span className={`stamp-badge audit-tone-${c.tone}`}>
+                          <c.Icon size={11} style={{ marginLeft: 3, verticalAlign: "-1px" }} />
+                          {c.label}
+                        </span>
+                      </td>
+                      <td className="cell-mono" title={new Date(e.time).toLocaleString("ar-SA")}>{timeAgoAr(e.time)}</td>
+                      <td className="cell-strong">{e.by || "—"}</td>
+                      <td className="cell-strong">{e.msg}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2585,6 +2636,9 @@ function ControlLoginModal({ onEnter, onClose, data }) {
   const [mode, setMode] = useState(null); // null | 'owner' | 'user'
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
+  const [ownerName, setOwnerName] = useState(() => {
+    try { return localStorage.getItem("warehouse-owner-display-name") || ""; } catch { return ""; }
+  });
   const [error, setError] = useState("");
   const [showForgot, setShowForgot] = useState(false);
 
@@ -2593,7 +2647,9 @@ function ControlLoginModal({ onEnter, onClose, data }) {
     if (!data) return;
     if (password === data.ownerPassword) {
       setError("");
-      onEnter({ type: "owner" });
+      const name = ownerName.trim();
+      try { localStorage.setItem("warehouse-owner-display-name", name); } catch {}
+      onEnter({ type: "owner", ownerName: name });
     } else {
       setError("كلمة المرور غير صحيحة");
     }
@@ -2638,9 +2694,16 @@ function ControlLoginModal({ onEnter, onClose, data }) {
         </div>
       ) : mode === "owner" ? (
         <form className="login-admin-form" onSubmit={submitOwner}>
+          <Field label="اسمك (اختياري — يظهر بسجل النشاط بدل «رئيس الموقع» فقط)">
+            <input
+              autoFocus className="input"
+              value={ownerName} onChange={(e) => setOwnerName(e.target.value)}
+              placeholder="مثال: محمد"
+            />
+          </Field>
           <Field label="كلمة مرور رئيس الموقع">
             <input
-              autoFocus type="password" className="input"
+              type="password" className="input"
               value={password} onChange={(e) => setPassword(e.target.value)}
               placeholder="أدخل كلمة المرور"
             />
@@ -2843,15 +2906,53 @@ function App() {
   });
 
   const [auditLog, setAuditLog] = useState([]);
+  const auditLogRef = React.useRef([]);
+  // اسم الفاعل الحالي (يُحدَّث لاحقاً بعد اشتقاق currentUser بالأسفل)،
+  // نحتفظ به بمرجع حتى تقدر notify() تقرأه دون إعادة ترتيب الكود
+  const actorRef = React.useRef("رئيس الموقع");
+
+  // تحميل سجل النشاط الدائم من Supabase عند فتح الموقع + مزامنة فورية
+  // بين كل الأجهزة (بدل السجل المحلي المؤقت السابق الذي يضيع بإغلاق الصفحة)
+  useEffect(() => {
+    let cancelled = false;
+    let unsub = null;
+    (async () => {
+      try {
+        const res = await window.storage?.get(AUDIT_KEY, false);
+        if (cancelled) return;
+        const list = res?.value ? JSON.parse(res.value) : [];
+        auditLogRef.current = list;
+        setAuditLog(list);
+      } catch {}
+      if (!cancelled && window.subscribeStorage) {
+        unsub = window.subscribeStorage(AUDIT_KEY, (rawValue, isLocalWrite) => {
+          if (cancelled || isLocalWrite) return;
+          try {
+            const list = JSON.parse(rawValue);
+            auditLogRef.current = list;
+            setAuditLog(list);
+          } catch {}
+        });
+      }
+    })();
+    return () => { cancelled = true; if (unsub) unsub(); };
+  }, []);
+
+  const pushAuditEntry = useCallback((msg) => {
+    const next = [{ msg, time: Date.now(), by: actorRef.current }, ...auditLogRef.current].slice(0, 500);
+    auditLogRef.current = next;
+    setAuditLog(next);
+    window.storage?.set(AUDIT_KEY, JSON.stringify(next), false).catch(() => {});
+  }, []);
 
   const notify = useCallback((msg, type = "success", opts = {}) => {
     setToast({ msg, type, id: Date.now() });
     if (!opts.silent) { playBeep(type === "error" ? "error" : "success"); hapticPulse(type === "error" ? "error" : "success"); }
     if (type !== "error" && !opts.silent) {
-      setAuditLog((log) => [{ msg, time: Date.now() }, ...log].slice(0, 60));
+      pushAuditEntry(msg);
     }
     setTimeout(() => setToast((t) => (t?.msg === msg ? null : t)), 2600);
-  }, []);
+  }, [pushAuditEntry]);
 
   const onRemoteUpdate = useCallback(() => {
     notify("تم تحديث البيانات من جهاز آخر", "success", { silent: true });
@@ -2896,8 +2997,8 @@ function App() {
     prevShortageRef.current = shortageNow;
   }, [inventory, session.type, data, systemNotify]);
 
-  // "مهامك اليوم" — تظهر تلقائياً مرة وحدة لكل دخول للعامل (session.type === "user")
-  // لو عنده مهام معلّقة مكلّف فيها شخصياً أو موجّهة لكل العاملين، دون إزعاجه بها
+  // "مهامك اليوم" — تظهر تلقائياً مرة وحدة لكل دخول للمنظم (session.type === "user")
+  // لو عنده مهام معلّقة مكلّف فيها شخصياً أو موجّهة لكل المنظمين، دون إزعاجه بها
   // في كل مرة يتنقل بين الصفحات.
   const [showMyTasks, setShowMyTasks] = useState(false);
   const shownTasksForUserRef = React.useRef(null);
@@ -2954,6 +3055,9 @@ function App() {
   const isOwner = session.type === "owner";
   const isGuest = session.type !== "owner" && session.type !== "user";
   const currentUser = session.type === "user" ? data.users.find((u) => u.id === session.userId) : null;
+  actorRef.current = isOwner
+    ? (session.ownerName ? `${session.ownerName} (رئيس الموقع)` : "رئيس الموقع")
+    : (currentUser?.username || "مستخدم");
 
   // مستخدم مؤقت انتهت صلاحيته أو حُذف حسابه — إخراج فوري
   if (session.type === "user" && (!currentUser || isTempExpired(currentUser))) {
@@ -3084,7 +3188,7 @@ function App() {
             className={`conn-dot ${sync.online ? "conn-dot-on" : "conn-dot-off"}`}
             title={sync.online ? (saving ? "جارٍ الحفظ…" : "متصل — يُحفظ تلقائياً") : "غير متصل — سيتم الحفظ عند عودة الاتصال"}
           />
-          <GlobalSearch data={data} inventory={inventory} go={go} />
+          <GlobalSearch data={data} inventory={inventory} go={go} currentUser={currentUser} isOwner={isOwner} />
           <ThemeToggle themePref={themePref} effectiveTheme={effectiveTheme} onSet={setThemePref} />
           {isOwner && (
             <button className="icon-btn" title="إعدادات التنبيهات" onClick={() => setShowNotifSettings(true)}>
@@ -3097,16 +3201,15 @@ function App() {
         </header>
 
         <main className="main-area">
-          {safePage === "dashboard" && <Dashboard inventory={inventory} data={data} go={go} readOnly={readOnly} onPrint={() => triggerPrint("dashboard")} />}
+          {safePage === "dashboard" && <Dashboard inventory={inventory} data={data} go={go} readOnly={readOnly} onPrint={() => triggerPrint("dashboard")} isOwner={isOwner} />}
           {safePage === "tasks" && <TasksPage data={data} setData={setData} notify={notify} isOwner={isOwner} currentUser={currentUser} />}
-          {safePage === "items" && <ItemsPage data={data} setData={setData} notify={notify} readOnly={readOnly} onPrint={() => triggerPrint("items")} systemNotify={systemNotify} />}
-          {safePage === "incoming" && <MovementPage kind="in" data={data} setData={setData} notify={notify} readOnly={readOnly} systemNotify={systemNotify} />}
-          {safePage === "outgoing" && <MovementPage kind="out" data={data} setData={setData} notify={notify} readOnly={readOnly} systemNotify={systemNotify} />}
-          {safePage === "inventory" && <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} />}
+          {safePage === "items" && <ItemsPage data={data} setData={setData} notify={notify} readOnly={readOnly} onPrint={() => triggerPrint("items")} systemNotify={systemNotify} currentUser={currentUser} isOwner={isOwner} inventory={inventory} />}
+          {safePage === "inventory" && <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} currentUser={currentUser} isOwner={isOwner} />}
           {safePage === "barcodes" && <BarcodesPage data={data} setData={setData} notify={notify} readOnly={readOnly} />}
           {safePage === "audit" && <AuditPage log={auditLog} />}
           {safePage === "users" && isOwner && <UsersPage data={data} setData={setData} notify={notify} />}
           {safePage === "groups" && isOwner && <GroupsPage data={data} setData={setData} notify={notify} />}
+          {safePage === "branches" && isOwner && <BranchesPage data={data} setData={setData} notify={notify} />}
         </main>
       </div>
 
@@ -3349,6 +3452,10 @@ function FontStyles() {
       .app-shell.is-mobile .stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
       .app-shell.is-mobile .chart-grid { grid-template-columns: 1fr !important; }
       .app-shell.is-mobile .form-grid, .app-shell.is-mobile .form-grid-move { grid-template-columns: 1fr 1fr !important; }
+      .app-shell.is-mobile .topbar { padding: 10px 12px !important; gap: 8px !important; }
+      .app-shell.is-mobile .global-search { max-width: none !important; padding: 7px 10px !important; }
+      .app-shell.is-mobile .topbar-logout-btn span { display: none !important; }
+      .app-shell.is-mobile .topbar-logout-btn { padding: 8px !important; }
       .app-shell.is-mobile .sidebar-backdrop {
         display: block !important; position: fixed; inset: 0; z-index: 65;
         background: rgba(20,26,32,0.4);
@@ -3429,10 +3536,13 @@ function FontStyles() {
       .hamburger { display: none; flex-direction: column; gap: 4px; background: none; border: none; cursor: pointer; padding: 6px; }
       .hamburger span { width: 20px; height: 2px; background: var(--ink); border-radius: 2px; }
 
-      .global-search { position: relative; flex: 1; max-width: 380px; display: flex; align-items: center; gap: 8px;
+      /* min-width:0 ضروري حتى يقدر عنصر flex:1 ينكمش تحت عرضه الطبيعي —
+         بدونها كان شريط البحث يرفض ينكمش بالشاشات الضيقة ويدفع زر تسجيل
+         الخروج والأزرار الثانية برا حدود الشاشة تماماً (يختفي بدل ما يظهر) */
+      .global-search { position: relative; flex: 1; min-width: 0; max-width: 380px; display: flex; align-items: center; gap: 8px;
         background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--ink-soft);
       }
-      .global-search input { border: none; outline: none; background: transparent; font-family: 'Tajawal'; font-size: 13px; color: var(--ink); flex: 1; }
+      .global-search input { border: none; outline: none; background: transparent; font-family: 'Tajawal'; font-size: 13px; color: var(--ink); flex: 1; min-width: 0; }
       .global-results { position: absolute; top: 42px; right: 0; left: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(var(--shadow-color),0.12); overflow: hidden; z-index: 20; }
       .global-result-item { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; background: none; border: none; border-bottom: 1px solid #eee2c9; cursor: pointer; text-align: right; }
       .global-result-item:last-child { border-bottom: none; }
@@ -3458,6 +3568,12 @@ function FontStyles() {
       .stat-value { font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 26px; }
       .stat-label { font-size: 12.5px; color: var(--ink-soft); }
       .tone-navy svg { color: var(--navy); } .tone-navy .stat-value { color: var(--navy); }
+
+      /* ---------- شارات نوع الحدث بسجل النشاط ---------- */
+      .audit-tone-green { color: var(--green); border-color: var(--green); background: var(--green-bg); }
+      .audit-tone-red { color: var(--red); border-color: var(--red); background: var(--red-bg); }
+      .audit-tone-amber { color: var(--amber); border-color: var(--amber); background: var(--amber-bg); }
+      .audit-tone-navy { color: var(--navy); border-color: var(--navy); background: var(--chip-bg); }
       .tone-green svg { color: var(--green); } .tone-green .stat-value { color: var(--green); }
       .tone-amber svg { color: var(--amber); } .tone-amber .stat-value { color: var(--amber); }
       .tone-red svg { color: var(--red); } .tone-red .stat-value { color: var(--red); }
@@ -3525,6 +3641,20 @@ function FontStyles() {
       .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 20px; padding: 7px 14px; font-size: 12px; font-family: 'Tajawal'; font-weight: 500; cursor: pointer; color: var(--ink-soft); }
       .chip-active { background: var(--navy); border-color: var(--navy); color: #F3EEDD; }
+
+      /* ---------- التسجيل السريع (دخول/خروج مباشرة من قائمة الأغراض) ---------- */
+      .quick-chip-in.chip-active { background: var(--green); border-color: var(--green); color: #fff; }
+      .quick-chip-out.chip-active { background: var(--red); border-color: var(--red); color: #fff; }
+      .quick-log-row { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+      .quick-log-qty { width: 72px; padding: 6px 8px; text-align: center; }
+      .quick-log-btn { border-radius: 8px; padding: 8px; }
+      .quick-log-btn-in { background: var(--green-bg); color: var(--green); }
+      .quick-log-btn-in:hover { background: var(--green); color: #fff; }
+      .quick-log-btn-out { background: var(--red-bg); color: var(--red); }
+      .quick-log-btn-out:hover { background: var(--red); color: #fff; }
+      @media (max-width: 520px) {
+        .quick-log-qty { width: 56px; }
+      }
 
       /* ---------- BUTTONS ---------- */
       .btn-primary, .btn-ghost, .btn-danger {
