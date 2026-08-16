@@ -1250,12 +1250,15 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   const myBranch = !isOwner && currentUser?.restrictedBranch;
   const branchItems = myBranch ? data.items.filter((i) => i.branch === myBranch) : data.items;
   const branchName = (id) => (data.branches || []).find((b) => b.id === id)?.name || "";
+  const itemName = (code) => data.items.find((i) => i.code === code)?.name || "";
+  const [boxView, setBoxView] = useState(null);
+  const boxContents = boxView ? data.items.filter((i) => i.parentCode === boxView.code) : [];
 
   const filtered = branchItems
     .filter((it) => fuzzyIncludes(it.name + it.code + it.category, query))
     .filter((it) => branchFilter === "all" || it.branch === branchFilter);
 
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "" } });
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -1404,7 +1407,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                   <th>الكود</th>
                   <th>اسم المنتج</th>
                   <th>الموقع / الفئة</th>
-                  {isOwner && <th>القسم</th>}
+                  <th>القسم</th>
                   {quickMode === "off" ? <th>ملاحظات</th> : <th>الرصيد الحالي</th>}
                   {!readOnly && <th></th>}
                 </tr>
@@ -1414,9 +1417,15 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                   <tr key={it.code}>
                     <td className="cell-mono">{idx + 1}</td>
                     <td><CodeTag code={it.code} /></td>
-                    <td className="cell-strong">{it.emoji ? `${it.emoji} ` : ""}{it.name}</td>
-                    <td className="cell-muted"><MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}</td>
-                    {isOwner && <td className="cell-muted">{branchName(it.branch) || "—"}</td>}
+                    <td className="cell-strong">
+                      {it.emoji ? `${it.emoji} ` : ""}{it.name}
+                      {it.isContainer && <span className="box-badge">📦 صندوق</span>}
+                    </td>
+                    <td className="cell-muted">
+                      <MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}
+                      {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
+                    </td>
+                    <td className="cell-muted">{branchName(it.branch) || "—"}</td>
                     {quickMode === "off" ? (
                       <td className="cell-muted">{it.notes || "—"}</td>
                     ) : (
@@ -1426,6 +1435,9 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                       <td>
                         {quickMode === "off" ? (
                           <div className="row-actions">
+                            {it.isContainer && (
+                              <button className="icon-btn" title="عرض المحتويات" onClick={() => setBoxView(it)}><Boxes size={15} /></button>
+                            )}
                             <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
                             <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
                           </div>
@@ -1477,7 +1489,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
-          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} onCancel={() => setModal(null)} onSave={save} />
+          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -1490,6 +1502,47 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
             <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
             <button className="btn-danger" onClick={() => remove(confirmDelete.code)}>حذف نهائياً</button>
           </div>
+        </Modal>
+      )}
+
+      {boxView && (
+        <Modal
+          title={`📦 محتويات «${boxView.name}»`}
+          onClose={() => setBoxView(null)}
+        >
+          {boxContents.length === 0 ? (
+            <EmptyState icon={Boxes} title="الصندوق فاضي" hint="ما فيه أي منتج مضاف داخل هذا الصندوق حتى الآن" />
+          ) : (
+            <div className="box-contents-list">
+              {boxContents.map((c) => (
+                <div className="box-contents-row" key={c.code}>
+                  <div>
+                    <div className="cell-strong">{c.emoji ? `${c.emoji} ` : ""}{c.name}</div>
+                    <div className="cell-muted" style={{ fontSize: 12 }}>{c.code} · الرصيد: {balanceFor(c.code)}</div>
+                  </div>
+                  {!readOnly && (
+                    <button className="icon-btn" onClick={() => { setBoxView(null); openEdit(c); }}><Pencil size={15} /></button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {!readOnly && (
+            <div className="modal-actions">
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  setBoxView(null);
+                  setModal({
+                    mode: "add",
+                    item: { code: "", name: "", category: boxView.category || "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: boxView.branch || myBranch || "", isContainer: false, parentCode: boxView.code },
+                  });
+                }}
+              >
+                <Plus size={16} /> إضافة منتج داخل هذا الصندوق
+              </button>
+            </div>
+          )}
         </Modal>
       )}
     </div>
@@ -1542,8 +1595,13 @@ function EmojiPicker({ value, onChange }) {
   );
 }
 
-function ItemForm({ item, itemGroups, branches, onCancel, onSave }) {
-  const [form, setForm] = useState(item);
+function ItemForm({ item, itemGroups, branches, allItems, onCancel, onSave }) {
+  const [form, setForm] = useState({ isContainer: false, parentCode: "", ...item });
+  // الأصناف المؤهلة تكون "صندوق" يوضع بداخله هذا الصنف: أي صنف عليه علامة isContainer
+  // باستثناء الصنف نفسه (لا يقدر يكون بداخل نفسه) وأي صندوق أصلاً بداخل هذا الصنف (يمنع الحلقات)
+  const containerOptions = (allItems || []).filter(
+    (i) => i.isContainer && i.code !== form.code && i.parentCode !== form.code
+  );
   const [cameraOpen, setCameraOpen] = useState(false);
   const codeRef = React.useRef(null);
   const nameRef = React.useRef(null);
@@ -1602,6 +1660,24 @@ function ItemForm({ item, itemGroups, branches, onCancel, onSave }) {
       <Field label="الموقع / الفئة">
         <input className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="مثال: الدولاب البني 1" />
       </Field>
+      <Field label="نوع الصنف">
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={!!form.isContainer}
+            onChange={(e) => setForm({ ...form, isContainer: e.target.checked, parentCode: e.target.checked ? "" : form.parentCode })}
+          />
+          <span>📦 هذا الصنف صندوق/حاوية يحتوي منتجات أخرى بداخله</span>
+        </label>
+      </Field>
+      {!form.isContainer && (
+        <Field label="داخل صندوق (اختياري)">
+          <select className="input" value={form.parentCode || ""} onChange={(e) => setForm({ ...form, parentCode: e.target.value })}>
+            <option value="">بدون — غير موضوع داخل صندوق</option>
+            {containerOptions.map((c) => <option key={c.code} value={c.code}>{c.emoji ? `${c.emoji} ` : ""}{c.name}</option>)}
+          </select>
+        </Field>
+      )}
       <Field label="القسم">
         <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
           <option value="">بدون قسم محدد</option>
@@ -2338,7 +2414,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
                   <StampBadge status={i.status} />
                 </div>
                 <CodeTag code={i.code} />
-                <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}{groupName(i.group) ? ` · ${groupName(i.group)}` : ""}{isOwner && branchName(i.branch) ? ` · ${branchName(i.branch)}` : ""}</div>
+                <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}{groupName(i.group) ? ` · ${groupName(i.group)}` : ""}{branchName(i.branch) ? ` · ${branchName(i.branch)}` : ""}</div>
                 {i.expiry && <ExpiryBadge expiry={i.expiry} daysLeft={i.daysLeft} />}
                 <div className="inv-card-balance">{i.balance} <span className="inv-card-balance-unit">الكمية</span></div>
               </div>
@@ -2352,7 +2428,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
                   <SortHeader label="الكود" k="code" />
                   <SortHeader label="اسم المنتج" k="name" />
                   <SortHeader label="الفئة / الموقع" k="category" />
-                  {isOwner && <th>القسم</th>}
+                  <th>القسم</th>
                   <SortHeader label="الداخل" k="inQty" />
                   <SortHeader label="الخارج" k="outQty" />
                   <SortHeader label="الكمية" k="balance" />
@@ -2366,7 +2442,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
                     <td><CodeTag code={i.code} /></td>
                     <td className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</td>
                     <td className="cell-muted">{i.category || "—"}</td>
-                    {isOwner && <td className="cell-muted">{branchName(i.branch) || "—"}</td>}
+                    <td className="cell-muted">{branchName(i.branch) || "—"}</td>
                     <td className="cell-mono">{i.inQty}</td>
                     <td className="cell-mono">{i.outQty}</td>
                     <td className="cell-mono cell-balance">{i.balance}</td>
@@ -2896,7 +2972,7 @@ function UsersPage({ data, setData, notify }) {
   const [modal, setModal] = useState(null); // { mode, user }
   const [confirmDelete, setConfirmDelete] = useState(null);
 
-  const openAdd = () => setModal({ mode: "add", user: { username: "", password: randomPassword(), canEdit: true, temp: false, durationKey: "1d", permissions: GRANTABLE_PAGES.map((p) => p.key) } });
+  const openAdd = () => setModal({ mode: "add", user: { username: "", name: "", password: randomPassword(), canEdit: true, temp: false, durationKey: "1d", permissions: GRANTABLE_PAGES.map((p) => p.key) } });
   const openEdit = (u) => setModal({ mode: "edit", user: { ...u, temp: !!u.tempUntil, durationKey: "1d", permissions: u.permissions || GRANTABLE_PAGES.map((p) => p.key) } });
 
   const save = (form) => {
@@ -2915,6 +2991,7 @@ function UsersPage({ data, setData, notify }) {
     const record = {
       id: form.id || genId("user"),
       username,
+      name: (form.name || "").trim(),
       password: form.password.trim(),
       canEdit: !!form.canEdit,
       restrictedBranch: form.restrictedBranch || "",
@@ -2949,13 +3026,14 @@ function UsersPage({ data, setData, notify }) {
           <div className="table-wrap">
             <table className="ledger-table">
               <thead>
-                <tr><th>اسم المستخدم</th><th>الصلاحية</th><th>القسم</th><th>الصفحات المتاحة</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
+                <tr><th>الاسم الحقيقي</th><th>اسم المستخدم</th><th>الصلاحية</th><th>القسم</th><th>الصفحات المتاحة</th><th>كلمة المرور</th><th>المدة</th><th></th></tr>
               </thead>
               <tbody>
                 {data.users.map((u) => {
                   const expired = isTempExpired(u);
                   return (
                     <tr key={u.id}>
+                      <td className="cell-strong">{u.name || "—"}</td>
                       <td className="cell-strong">{u.username}</td>
                       <td>
                         <span className="stamp-badge" style={u.canEdit
@@ -3031,6 +3109,9 @@ function UserForm({ user, branches, onCancel, onSave }) {
 
   return (
     <div className="form-grid">
+      <Field label="الاسم الحقيقي (يظهر في سجل النشاط)">
+        <input className="input" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: محمد العتيبي" />
+      </Field>
       <Field label="اسم المستخدم">
         <input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="مثال: mohammed" />
       </Field>
@@ -3397,7 +3478,7 @@ function TaskForm({ users, onCancel, onSave }) {
       <Field label="تكليف">
         <select className="input" value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)}>
           <option value="all">كل المنظمين</option>
-          {users.map((u) => <option key={u.id} value={u.id}>{u.username}</option>)}
+          {users.map((u) => <option key={u.id} value={u.id}>{u.name || u.username}</option>)}
         </select>
       </Field>
       <Field label="موعد التسليم (اختياري)">
@@ -3437,7 +3518,7 @@ function TasksPage({ data, setData, notify, isOwner, currentUser }) {
   const addTask = ({ text, assignedTo, dueDate }) => {
     const task = {
       id: genId("task"), text, assignedTo, dueDate,
-      done: false, createdAt: new Date().toISOString(), createdBy: currentUser?.username || "رئيس الموقع",
+      done: false, createdAt: new Date().toISOString(), createdBy: currentUser?.name || currentUser?.username || "رئيس الموقع",
       doneAt: null, doneBy: null,
     };
     setData({ ...data, tasks: [task, ...tasks] });
@@ -3450,7 +3531,7 @@ function TasksPage({ data, setData, notify, isOwner, currentUser }) {
     setData({
       ...data,
       tasks: tasks.map((t) => (t.id === task.id
-        ? { ...t, done, doneAt: done ? new Date().toISOString() : null, doneBy: done ? (currentUser?.username || "رئيس الموقع") : null }
+        ? { ...t, done, doneAt: done ? new Date().toISOString() : null, doneBy: done ? (currentUser?.name || currentUser?.username || "رئيس الموقع") : null }
         : t)),
     });
     notify(done ? "تم تحديد المهمة كمنجزة" : "تم إرجاع المهمة كمعلّقة");
@@ -3600,7 +3681,7 @@ function AuditPage({ log, isOwner, currentUser }) {
 
   // منظم عادي يشوف نشاطه هو فقط؛ رئيس الموقع فقط يشوف سجل الجميع
   const visibleLog = useMemo(
-    () => (isOwner ? log : log.filter((e) => e.by === (currentUser?.username || "مستخدم"))),
+    () => (isOwner ? log : log.filter((e) => e.by === (currentUser?.name || currentUser?.username || "مستخدم"))),
     [log, isOwner, currentUser]
   );
 
@@ -4506,7 +4587,7 @@ function App() {
   const currentOwner = isOwner ? (data.owners || []).find((o) => o.id === session.ownerId) : null;
   actorRef.current = isOwner
     ? (currentOwner ? `${currentOwner.name} (رئيس الموقع)` : "رئيس الموقع")
-    : (currentUser?.username || "مستخدم");
+    : (currentUser?.name || currentUser?.username || "مستخدم");
 
   // رئيس تم حذف حسابه (من رئيس آخر) وهو ما زال بجلسة مفتوحة — إخراج فوري
   if (session.type === "owner" && !currentOwner) {
@@ -4617,7 +4698,7 @@ function App() {
   };
 
   const roleLabel = isOwner ? `${currentOwner?.name || "رئيس الموقع"} — ${isRestrictedOwner ? "صلاحيات محددة" : "تحكم كامل"}`
-    : `${currentUser?.username}${readOnly ? " (قراءة فقط)" : " (يقدر يعدّل)"}`;
+    : `${currentUser?.name || currentUser?.username}${readOnly ? " (قراءة فقط)" : " (يقدر يعدّل)"}`;
 
   return (
     <div className={`app-shell ${isMobile ? "is-mobile" : ""}`}>
@@ -4735,7 +4816,7 @@ function App() {
             setData({
               ...data,
               tasks: data.tasks.map((t) => (t.id === taskId
-                ? { ...t, done: true, doneAt: new Date().toISOString(), doneBy: currentUser?.username || "?" }
+                ? { ...t, done: true, doneAt: new Date().toISOString(), doneBy: currentUser?.name || currentUser?.username || "?" }
                 : t)),
             });
           }}
@@ -5204,6 +5285,11 @@ function FontStyles() {
       .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
       .form-grid-move { grid-template-columns: 1fr 1fr 1fr; }
       .field { display: flex; flex-direction: column; gap: 6px; position: relative; }
+      .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink); background: var(--surface-hover); border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+      .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--navy); cursor: pointer; }
+      .box-contents-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+      .box-contents-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-hover); }
+      .box-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); background: var(--chip-bg); border-radius: 999px; padding: 2px 8px; margin-inline-start: 6px; }
       .field-full { grid-column: 1 / -1; }
       .field-label { font-size: 12px; font-weight: 700; color: var(--ink-soft); }
       .perm-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
