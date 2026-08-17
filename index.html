@@ -296,7 +296,7 @@ function withDefaults(d) {
     itemGroups: Array.isArray(d.itemGroups) && d.itemGroups.length ? d.itemGroups : DEFAULT_ITEM_GROUPS,
     users: Array.isArray(d.users) ? d.users.map((u) => ({ canEdit: true, branch: "", ...u })) : [],
     tasks: Array.isArray(d.tasks) ? d.tasks : [],
-    branches: Array.isArray(d.branches) && d.branches.length ? d.branches : DEFAULT_BRANCHES,
+    branches: (Array.isArray(d.branches) && d.branches.length ? d.branches : DEFAULT_BRANCHES).map((b) => ({ defaultGroup: "", ...b })),
     // كل باركود ينتمي اختيارياً لقسم (نفس أقسام صفحة "الأقسام")؛ الباركودات
     // القديمة المحفوظة قبل هذه الميزة تُعامل تلقائياً كـ "غير مصنّفة"
     barcodes: Array.isArray(d.barcodes) ? d.barcodes.map((b) => ({ branch: "", ...b })) : [],
@@ -304,6 +304,10 @@ function withDefaults(d) {
     // الأنشطة المؤقتة (مثل رحلة أو مناسبة): تُخرج أغراضاً من المخزون مؤقتاً
     // ثم "تُرجع" كلها دفعة واحدة عند انتهاء النشاط
     activities: Array.isArray(d.activities) ? d.activities : [],
+    // الشاشة التي تظهر لأي زائر يفتح الموقع قبل تسجيل الدخول (وضع العرض) —
+    // يتحكم بها رئيس الموقع فقط من «إعدادات شاشة البداية»
+    guestScreen: ["inventory", "dashboard", "welcome"].includes(d.guestScreen) ? d.guestScreen : "inventory",
+    guestWelcomeText: typeof d.guestWelcomeText === "string" ? d.guestWelcomeText : "",
   };
 }
 
@@ -388,11 +392,23 @@ function useStore(onRemoteUpdate) {
   // نتذكّر آخر نسخة كتبناها نحن بأنفسنا، حتى نتجاهل صداها القادم عبر
   // Realtime (لأن Supabase يرسل الحدث للجهاز المُرسِل نفسه أيضاً)
   const lastLocalWriteRef = React.useRef(null);
+  // آخر نسخة "نعرف بالتأكيد" أنها موجودة فعلياً على الخادم — تُحدَّث عند كل
+  // تحميل أو استلام تحديث لحظي من جهاز آخر أو حفظ ناجح من هذا الجهاز.
+  // تُستخدم لاكتشاف ما إذا عدّل جهاز آخر البيانات دون أن نستلم إشعاره بعد
+  // (تأخير بالشبكة مثلاً) قبل أن نكتب فوقها بتعديلنا نحن.
+  const knownRemoteRef = React.useRef(null);
   // كاش محلي لآخر نسخة بيانات وصلت بنجاح من الخادم — يُستخدم فقط عند
   // انقطاع الاتصال لعرض آخر بيانات معروفة بدل الرجوع لبيانات افتراضية
   // فارغة (وهو خطأ كان موجوداً سابقاً: أي انقطاع بالفتح الأول كان يمسح
   // شكل البيانات ويستبدلها بعيّنة تجريبية).
   const READ_CACHE_KEY = "warehouse-read-cache-v1";
+
+  // نتذكّر أننا حمّلنا بيانات حقيقية من الخادم بنجاح ولو مرة واحدة من قبل
+  // (على أي جهاز فتح الموقع) — حتى لا نعيد "تبذير" بيانات تجريبية فوق
+  // بيانات حقيقية موجودة فعلاً في حال رجع الخادم استجابة فارغة لأي سبب
+  // عابر (رجوع الصف فارغاً مؤقتاً، مفتاح تغيّر بالخطأ، مشكلة صلاحيات...الخ).
+  // هذا هو السبب الحقيقي الأكثر شيوعاً لمشكلة "اختفاء البيانات فجأة".
+  const EVER_LOADED_KEY = "warehouse-ever-loaded-v1";
 
   useEffect(() => {
     let cancelled = false;
@@ -404,17 +420,49 @@ function useStore(onRemoteUpdate) {
           if (res?.value) {
             dataRef.current = withDefaults(JSON.parse(res.value));
             setData(dataRef.current);
-            try { localStorage.setItem(READ_CACHE_KEY, res.value); } catch {}
+            knownRemoteRef.current = res.value;
+            try {
+              localStorage.setItem(READ_CACHE_KEY, res.value);
+              localStorage.setItem(EVER_LOADED_KEY, "1");
+            } catch {}
           } else {
-            const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
-            dataRef.current = seed;
-            setData(seed);
-            const serializedSeed = JSON.stringify(seed);
-            lastLocalWriteRef.current = serializedSeed;
-            await window.storage?.set(STORE_KEY, serializedSeed, false);
+            // الخادم رجّع "لا يوجد صف بهذا المفتاح" — هذا طبيعي فقط أول مرة
+            // يُفتح فيها الموقع على الإطلاق. لو سبق ونجحنا بتحميل بيانات
+            // حقيقية من قبل (على هذا الجهاز)، فهذا يعني على الأغلب مشكلة
+            // مؤقتة بالخادم/الصلاحيات وليس أن البيانات فُقدت فعلاً — لذلك
+            // لا نكتب فوقها بيانات تجريبية، بل نستخدم آخر نسخة محفوظة محلياً
+            // ونعرض الموقع كـ "غير متصل" حتى لا نمحو بيانات حقيقية بالخطأ.
+            let everLoaded = false;
+            try { everLoaded = localStorage.getItem(EVER_LOADED_KEY) === "1"; } catch {}
+            if (everLoaded) {
+              let cached = null;
+              try {
+                const raw = localStorage.getItem(READ_CACHE_KEY);
+                if (raw) cached = withDefaults(JSON.parse(raw));
+              } catch {}
+              if (cached) {
+                dataRef.current = cached;
+                setData(cached);
+                setOnline(false);
+              } else {
+                const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
+                dataRef.current = seed;
+                setData(seed);
+                setOnline(true);
+                setLastSynced(Date.now());
+              }
+            } else {
+              const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
+              dataRef.current = seed;
+              setData(seed);
+              const serializedSeed = JSON.stringify(seed);
+              lastLocalWriteRef.current = serializedSeed;
+              await window.storage?.set(STORE_KEY, serializedSeed, false);
+              try { localStorage.setItem(EVER_LOADED_KEY, "1"); } catch {}
+              setOnline(true);
+              setLastSynced(Date.now());
+            }
           }
-          setOnline(true);
-          setLastSynced(Date.now());
         }
       } catch {
         if (!cancelled) {
@@ -438,6 +486,7 @@ function useStore(onRemoteUpdate) {
           // (Realtime يرسل الحدث لصاحب التعديل أيضاً، وهذا هو مصدر إشعار
           // "تم تحديث البيانات من جهاز آخر" الذي كان يظهر حتى لتعديلاتنا نحن)
           if (rawValue === lastLocalWriteRef.current) return;
+          knownRemoteRef.current = rawValue;
           try {
             const next = withDefaults(JSON.parse(rawValue));
             dataRef.current = next;
@@ -456,13 +505,45 @@ function useStore(onRemoteUpdate) {
   const OFFLINE_KEY = "warehouse-offline-pending-v1";
 
   const persist = useCallback(async (next) => {
+    const serialized = JSON.stringify(next);
+
+    // فحص تعارض: تأكد أن ما يوجد حالياً على الخادم لا يزال هو نفس آخر نسخة
+    // نعرفها، قبل أن نكتب فوقها. لو جهاز آخر عدّل البيانات قبلنا مباشرة
+    // (ولم يصلنا إشعاره اللحظي بعد بسبب تأخر بالشبكة)، فهذا يمنع ضياع
+    // تعديل ذلك الجهاز الآخر بصمت — بدل أن يكتشف صاحبه لاحقاً أن بياناته
+    // "اختفت".
+    try {
+      const latest = await window.storage?.get(STORE_KEY, false);
+      if (latest?.value && knownRemoteRef.current && latest.value !== knownRemoteRef.current && latest.value !== serialized) {
+        const proceed = window.confirm(
+          "تم تعديل البيانات من جهاز آخر منذ آخر تحديث وصلك.\n" +
+          "لو تابعت الحفظ الآن سيُستبدل ذلك التعديل الآخر بتعديلك الحالي.\n\n" +
+          "اضغط «إلغاء» لتحميل أحدث نسخة أولاً، أو «موافق» للمتابعة والحفظ فوقها."
+        );
+        if (!proceed) {
+          try {
+            const fresh = withDefaults(JSON.parse(latest.value));
+            dataRef.current = fresh;
+            setData(fresh);
+            knownRemoteRef.current = latest.value;
+            try { localStorage.setItem(READ_CACHE_KEY, latest.value); } catch {}
+          } catch {}
+          setSaving(false);
+          return;
+        }
+      }
+    } catch {
+      // تعذّر فحص التعارض (غالباً بسبب انقطاع الاتصال) — نكمل عادي، وسيتكفّل
+      // المسار العادي بالأسفل بمعالجة حالة عدم الاتصال.
+    }
+
     dataRef.current = next;
     setData(next);
     setSaving(true);
-    const serialized = JSON.stringify(next);
     lastLocalWriteRef.current = serialized;
     try {
       await window.storage?.set(STORE_KEY, serialized, false);
+      knownRemoteRef.current = serialized;
       setOnline(true);
       setLastSynced(Date.now());
       try { localStorage.removeItem(OFFLINE_KEY); localStorage.setItem(READ_CACHE_KEY, serialized); } catch {}
@@ -484,6 +565,7 @@ function useStore(onRemoteUpdate) {
       try {
         lastLocalWriteRef.current = pending;
         await window.storage?.set(STORE_KEY, pending, false);
+        knownRemoteRef.current = pending;
         try { localStorage.removeItem(OFFLINE_KEY); } catch {}
         setOnline(true);
         setLastSynced(Date.now());
@@ -902,7 +984,11 @@ function BarcodeCameraModal({ onDetect, onClose }) {
           try {
             const codes = await detector.detect(videoRef.current);
             if (codes && codes.length > 0) {
-              const value = (codes[0].rawValue || "").trim();
+              const raw = (codes[0].rawValue || "").trim();
+              // لو الكود المقروء QR نحوّل محتواه لأرقام فقط (نتجاهل أي حروف
+              // أو رموز أخرى بداخله)، بينما باقي أنواع الباركود (EAN وغيرها)
+              // تُستخدم كما هي لأنها أرقام أصلاً
+              const value = codes[0].format === "qr_code" ? raw.replace(/\D+/g, "") : raw;
               if (value) {
                 cancelled = true;
                 cleanup();
@@ -1267,7 +1353,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
     .filter((it) => fuzzyIncludes(it.name + it.code + it.category, query))
     .filter((it) => branchFilter === "all" || it.branch === branchFilter);
 
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "", initialQty: "" } });
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "", initialQty: "0" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -1517,7 +1603,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
-          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} mode={modal.mode} onCancel={() => setModal(null)} onSave={save} />
+          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} barcodes={data.barcodes} mode={modal.mode} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -1623,8 +1709,8 @@ function EmojiPicker({ value, onChange }) {
   );
 }
 
-function ItemForm({ item, itemGroups, branches, allItems, mode, onCancel, onSave }) {
-  const [form, setForm] = useState({ isContainer: false, parentCode: "", initialQty: "", ...item });
+function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, onCancel, onSave }) {
+  const [form, setForm] = useState({ isContainer: false, parentCode: "", initialQty: "0", ...item });
   // الأصناف المؤهلة تكون "صندوق" يوضع بداخله هذا الصنف: أي صنف عليه علامة isContainer
   // باستثناء الصنف نفسه (لا يقدر يكون بداخل نفسه) وأي صندوق أصلاً بداخل هذا الصنف (يمنع الحلقات)
   const containerOptions = (allItems || []).filter(
@@ -1635,6 +1721,32 @@ function ItemForm({ item, itemGroups, branches, allItems, mode, onCancel, onSave
   const nameRef = React.useRef(null);
 
   useEffect(() => { codeRef.current?.focus(); }, []);
+
+  // كل باركود مسجّل مسبقاً بصفحة "الباركودات" معروف بكل الموقع، فلو الكود
+  // المدخل هنا (كتابة أو مسح) يطابق واحداً منها نعبّي اسم الصنف تلقائياً
+  // منه بدل ما يعيد المستخدم كتابته يدوياً
+  const matchedBarcode = React.useMemo(
+    () => (barcodes || []).find((b) => b.number === (form.code || "").trim()),
+    [form.code, barcodes]
+  );
+  useEffect(() => {
+    if (matchedBarcode && !form.name.trim()) {
+      setForm((f) => ({ ...f, name: matchedBarcode.name }));
+    }
+  }, [matchedBarcode]);
+
+  // لو القسم المختار له "مجموعة افتراضية" (تُضبط من صفحة الأقسام)، نعبّيها
+  // تلقائياً عند إضافة صنف جديد — فقط إن لم يختر المستخدم مجموعة بنفسه بعد،
+  // حتى يقدر دائماً يغيّرها يدوياً لو حاب صنفاً من نوع مختلف
+  const [groupTouched, setGroupTouched] = useState(false);
+  useEffect(() => {
+    if (mode !== "add" || groupTouched || form.group) return;
+    const b = (branches || []).find((x) => x.id === form.branch);
+    if (b && b.defaultGroup) {
+      const g = itemGroups.find((x) => x.id === b.defaultGroup);
+      setForm((f) => ({ ...f, group: b.defaultGroup, emoji: f.emoji || (g ? suggestEmojiForGroup(g.name) : f.emoji) }));
+    }
+  }, [form.branch, mode]);
 
   const handleCodeKeyDown = (e) => {
     if (e.key === "Enter") {
@@ -1650,11 +1762,20 @@ function ItemForm({ item, itemGroups, branches, allItems, mode, onCancel, onSave
   };
 
   const pickGroup = (groupId) => {
+    setGroupTouched(true);
     const g = itemGroups.find((x) => x.id === groupId);
     // إذا ما اختار المستخدم إيموجي بعد، نقترح له واحداً يناسب المجموعة
     const suggested = !form.emoji && g ? suggestEmojiForGroup(g.name) : form.emoji;
     setForm({ ...form, group: groupId, emoji: suggested });
   };
+
+  // مواقع مقترحة (Autocomplete) لحقل "الموقع" بناءً على المواقع المستخدمة
+  // فعلياً داخل نفس القسم المختار — لأن المواقع منطقياً موجودة داخل الأقسام
+  // (مثال: قسم المكتبة بداخله مواقع مثل "الرف الأول")
+  const suggestedLocations = React.useMemo(() => {
+    const pool = (allItems || []).filter((i) => !form.branch || i.branch === form.branch);
+    return [...new Set(pool.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar"));
+  }, [allItems, form.branch]);
 
   return (
     <>
@@ -1672,6 +1793,11 @@ function ItemForm({ item, itemGroups, branches, allItems, mode, onCancel, onSave
           />
           <ScanCameraButton onClick={() => setCameraOpen(true)} />
         </div>
+        {matchedBarcode && (
+          <div className="barcode-match-hint">
+            <Barcode size={12} /> تم التعرف عليه من قائمة الباركودات: «{matchedBarcode.name}»
+          </div>
+        )}
       </Field>
       <Field label="اسم المنتج">
         <input ref={nameRef} className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="اسم الصنف" />
@@ -1685,8 +1811,21 @@ function ItemForm({ item, itemGroups, branches, allItems, mode, onCancel, onSave
           {itemGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
       </Field>
-      <Field label="الموقع / الفئة">
-        <input className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="مثال: الدولاب البني 1" />
+      <Field label="القسم">
+        <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
+          <option value="">بدون قسم محدد</option>
+          {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </Field>
+      <Field label="الموقع (داخل القسم)">
+        <input
+          className="input" list="item-location-suggestions"
+          value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
+          placeholder="مثال: الرف الأول"
+        />
+        <datalist id="item-location-suggestions">
+          {suggestedLocations.map((loc) => <option key={loc} value={loc} />)}
+        </datalist>
       </Field>
       <Field label="نوع الصنف">
         <label className="checkbox-row">
@@ -1706,12 +1845,6 @@ function ItemForm({ item, itemGroups, branches, allItems, mode, onCancel, onSave
           </select>
         </Field>
       )}
-      <Field label="القسم">
-        <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
-          <option value="">بدون قسم محدد</option>
-          {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-        </select>
-      </Field>
       <Field label="ملاحظات">
         <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" />
       </Field>
@@ -2708,13 +2841,40 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
     [scopedInventory]
   );
 
-  // عدد الأصناف بكل قسم/موقع — لعرض "قائمة الأقسام" بشكل واضح بدل قائمة
-  // منسدلة مخفية فقط
+  // عدد الأصناف بكل موقع — لعرض "قائمة المواقع" بشكل واضح بدل قائمة منسدلة
+  // مخفية فقط. المواقع هنا هي حقل "الموقع/الفئة" على كل صنف، وهي مفهوم
+  // مختلف عن "الأقسام" الحقيقية (branches)، لذا نجمّعها أيضاً حسب القسم
+  // الذي تنتمي له كل مجموعة مواقع — تماماً مثل "قسم المكتبة" وبداخله عدة
+  // مواقع (الرف الأول، الرف الثاني...)
   const locationCounts = useMemo(() => {
     const m = {};
     scopedInventory.forEach((i) => { if (i.category) m[i.category] = (m[i.category] || 0) + 1; });
     return m;
   }, [scopedInventory]);
+
+  const locationGroups = useMemo(() => {
+    const byBranch = new Map(); // branchId ("" = بدون قسم) -> Map(location -> count)
+    scopedInventory.forEach((i) => {
+      if (!i.category) return;
+      const bKey = i.branch || "";
+      if (!byBranch.has(bKey)) byBranch.set(bKey, new Map());
+      const inner = byBranch.get(bKey);
+      inner.set(i.category, (inner.get(i.category) || 0) + 1);
+    });
+    const groups = [...byBranch.entries()].map(([bKey, inner]) => ({
+      branchId: bKey,
+      branchLabel: bKey ? (branchName(bKey) || bKey) : "بدون قسم",
+      locations: [...inner.entries()]
+        .map(([loc, count]) => ({ loc, count }))
+        .sort((a, b) => a.loc.localeCompare(b.loc, "ar")),
+    }));
+    groups.sort((a, b) => {
+      if (!a.branchId) return 1;
+      if (!b.branchId) return -1;
+      return a.branchLabel.localeCompare(b.branchLabel, "ar");
+    });
+    return groups;
+  }, [scopedInventory, branches]);
 
   const filtered = scopedInventory
     .filter((i) => fuzzyIncludes(i.name + i.code + i.category, query))
@@ -2803,24 +2963,31 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
 
       {locations.length > 0 && (
         <div className="panel cat-list-panel">
-          <div className="cat-list-title"><Tags size={14} /> قائمة الأقسام</div>
+          <div className="cat-list-title"><MapPin size={14} /> قائمة المواقع</div>
           <div className="cat-list-row">
             <button
               className={`chip ${locationFilter === "all" ? "chip-active" : ""}`}
               onClick={() => setLocationFilter("all")}
             >
-              كل الأقسام <span className="cat-count">{scopedInventory.length}</span>
+              كل المواقع <span className="cat-count">{scopedInventory.length}</span>
             </button>
-            {locations.map((loc) => (
-              <button
-                key={loc}
-                className={`chip ${locationFilter === loc ? "chip-active" : ""}`}
-                onClick={() => setLocationFilter((cur) => (cur === loc ? "all" : loc))}
-              >
-                {loc} <span className="cat-count">{locationCounts[loc] || 0}</span>
-              </button>
-            ))}
           </div>
+          {locationGroups.map((g) => (
+            <div className="cat-branch-group" key={g.branchId || "none"}>
+              <div className="cat-branch-label">{g.branchLabel}</div>
+              <div className="cat-list-row">
+                {g.locations.map(({ loc, count }) => (
+                  <button
+                    key={loc}
+                    className={`chip ${locationFilter === loc ? "chip-active" : ""}`}
+                    onClick={() => setLocationFilter((cur) => (cur === loc ? "all" : loc))}
+                  >
+                    {loc} <span className="cat-count">{count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -2897,6 +3064,7 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
   // "all" = كل الباركودات · "unassigned" = بدون قسم · وإلا معرّف القسم نفسه
   const [sectionFilter, setSectionFilter] = useState("all");
+  const [query, setQuery] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
   const [flashIdx, setFlashIdx] = useState(null);
   const cardRefs = React.useRef({});
@@ -2960,7 +3128,8 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
       if (sectionFilter === "all") return true;
       if (sectionFilter === "unassigned") return !b.branch;
       return b.branch === sectionFilter;
-    });
+    })
+    .filter(({ b }) => fuzzyIncludes(b.name + " " + b.number + " " + sectionName(b.branch), query));
 
   const pageTitle = sectionFilter === "all"
     ? "الباركودات"
@@ -2982,6 +3151,13 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
           </div>
         }
       />
+
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={16} />
+          <input placeholder="ابحث بالاسم أو الرقم أو القسم…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+      </div>
 
       {branches.length > 0 && (
         <div className="filter-chips">
@@ -3005,7 +3181,11 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
 
       <div className="panel">
         {visible.length === 0 ? (
-          <EmptyState icon={Barcode} title="لا توجد باركودات في هذا القسم" hint="أضف باركوداً جديداً أو امسح كوداً لتسجيله هنا مباشرة" />
+          <EmptyState
+            icon={Barcode}
+            title={query ? "لا توجد نتائج مطابقة للبحث" : "لا توجد باركودات في هذا القسم"}
+            hint="أضف باركوداً جديداً أو امسح كوداً لتسجيله هنا مباشرة"
+          />
         ) : (
           <div className="barcode-grid">
             {visible.map(({ b, idx }) => (
@@ -3735,13 +3915,14 @@ function BranchesPage({ data, setData, notify }) {
 
   const itemCountFor = (id) => data.items.filter((i) => i.branch === id).length;
   const userCountFor = (id) => data.users.filter((u) => u.restrictedBranch === id).length;
+  const groupName = (id) => data.itemGroups.find((g) => g.id === id)?.name || "";
 
   const openAdd = () => setModal({ mode: "add", branch: { name: "" } });
   const openEdit = (b) => setModal({ mode: "edit", branch: { ...b } });
 
   const save = (form) => {
     if (!form.name.trim()) { notify("اسم القسم مطلوب", "error"); return; }
-    const record = { id: form.id || genId("br"), name: form.name.trim() };
+    const record = { id: form.id || genId("br"), name: form.name.trim(), defaultGroup: form.defaultGroup || "" };
     const exists = data.branches.some((b) => b.id === record.id);
     const branches = exists ? data.branches.map((b) => (b.id === record.id ? record : b)) : [...data.branches, record];
     setData({ ...data, branches });
@@ -3770,11 +3951,12 @@ function BranchesPage({ data, setData, notify }) {
         ) : (
           <div className="table-wrap">
             <table className="ledger-table">
-              <thead><tr><th>اسم القسم</th><th>عدد الأصناف</th><th>عدد المنظمين المقيّدين فيه</th><th></th></tr></thead>
+              <thead><tr><th>اسم القسم</th><th>المجموعة الافتراضية</th><th>عدد الأصناف</th><th>عدد المنظمين المقيّدين فيه</th><th></th></tr></thead>
               <tbody>
                 {data.branches.map((b) => (
                   <tr key={b.id}>
                     <td className="cell-strong"><MapPin size={13} style={{ marginLeft: 4, verticalAlign: "-2px" }} />{b.name}</td>
+                    <td className="cell-muted">{b.defaultGroup ? groupName(b.defaultGroup) : "بدون"}</td>
                     <td className="cell-mono">{itemCountFor(b.id)}</td>
                     <td className="cell-mono">{userCountFor(b.id)}</td>
                     <td>
@@ -3793,7 +3975,7 @@ function BranchesPage({ data, setData, notify }) {
 
       {modal && (
         <Modal title={modal.mode === "add" ? "إضافة قسم" : "تعديل القسم"} onClose={() => setModal(null)}>
-          <BranchForm branch={modal.branch} onCancel={() => setModal(null)} onSave={save} />
+          <BranchForm branch={modal.branch} itemGroups={data.itemGroups} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -3810,8 +3992,8 @@ function BranchesPage({ data, setData, notify }) {
   );
 }
 
-function BranchForm({ branch, onCancel, onSave }) {
-  const [form, setForm] = useState(branch);
+function BranchForm({ branch, itemGroups, onCancel, onSave }) {
+  const [form, setForm] = useState({ defaultGroup: "", ...branch });
   return (
     <div className="form-grid">
       <Field label="اسم القسم">
@@ -3819,6 +4001,13 @@ function BranchForm({ branch, onCancel, onSave }) {
           autoFocus className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
           placeholder="مثال: القسم الرئيسي، مستودع جدة"
         />
+      </Field>
+      <Field label="المجموعة الافتراضية للأصناف الجديدة (اختياري)">
+        <select className="input" value={form.defaultGroup || ""} onChange={(e) => setForm({ ...form, defaultGroup: e.target.value })}>
+          <option value="">بدون افتراضي — أختار المجموعة يدوياً كل مرة</option>
+          {(itemGroups || []).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+        <div className="field-hint">لما تضيف صنفاً جديداً بهذا القسم، تتعبّى له هذه المجموعة تلقائياً — وتقدر دائماً تغيّرها يدوياً لأي صنف.</div>
       </Field>
       <div className="modal-actions">
         <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
@@ -4236,6 +4425,48 @@ function ForgotPasswordPanel({ mode, data, ownerNameInput, onClose }) {
 }
 
 // نافذة "الدخول للتحكم" — تظهر عند طلب المستخدم الانتقال من وضع العرض
+// شاشة "لوحة معلومات مختصرة" لوضع العرض (قبل تسجيل الدخول) — أرقام إجمالية
+// فقط بدون تفاصيل كل صنف، لرئيس الموقع اللي يفضّل ما يعرض تفاصيل المخزون
+// للزوار لكنه يحب يظهر أرقام عامة.
+function GuestDashboardSummary({ inventory }) {
+  const total = inventory.length;
+  const available = inventory.filter((i) => i.status === "available").length;
+  const low = inventory.filter((i) => i.status === "low").length;
+  const empty = inventory.filter((i) => i.status === "empty").length;
+  const cards = [
+    { label: "إجمالي الأصناف", value: total, tone: "navy" },
+    { label: "متوفر", value: available, tone: "green" },
+    { label: "ناقص", value: low, tone: "amber" },
+    { label: "نافد", value: empty, tone: "red" },
+  ];
+  return (
+    <div className="stat-grid">
+      {cards.map((s) => (
+        <div key={s.label} className={`stat-card tone-${s.tone}`}>
+          <div className="stat-value">{s.value}</div>
+          <div className="stat-label">{s.label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// شاشة "ترحيب فقط" لوضع العرض — لا تُظهر أي بيانات مخزون إطلاقاً، فقط
+// شعار الموقع ورسالة اختيارية يكتبها رئيس الموقع من «إعدادات شاشة البداية».
+function GuestWelcomeScreen({ text }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: "60px 20px", gap: 14 }}>
+      <div className="brand-mark" style={{ width: 56, height: 56 }}>
+        <Boxes size={28} strokeWidth={2.2} />
+      </div>
+      <div style={{ fontWeight: 800, fontSize: 20 }}>المستودع</div>
+      <div style={{ color: "var(--ink-soft)", fontSize: 14, maxWidth: 420, lineHeight: 1.7 }}>
+        {text?.trim() || "مرحباً بك. لعرض المخزون أو التعديل، سجّل الدخول من الزر أعلاه."}
+      </div>
+    </div>
+  );
+}
+
 // إلى وضع التحكم والتعديل (مستخدم أو رئيس الموقع)، محمية بكلمة مرور
 function ControlLoginModal({ onEnter, onClose, data }) {
   const [mode, setMode] = useState(null); // null | 'owner' | 'user'
@@ -4462,6 +4693,60 @@ function NotificationSettingsModal({ settings, onSave, onClose, ownerId }) {
         <p style={{ fontSize: 11.5, color: "var(--ink-soft)", marginTop: 4 }}>
           ملاحظة: الخيارات أعلاه (كل التنبيهات / النقص فقط / إيقاف) تتحكم في نوع الأحداث التي تُرسل تنبيهاً، وتطبَّق على كلا النوعين معاً: التنبيه الفوري داخل المتصفح وتنبيهات الجوال اللحظية (Push).
         </p>
+      </div>
+    </Modal>
+  );
+}
+
+// نافذة «إعدادات شاشة البداية» — لرئيس الموقع (بتحكم كامل) فقط. تتحكم بما
+// يظهر لأي زائر يفتح الموقع قبل تسجيل الدخول (وضع العرض): إما المخزون
+// للقراءة فقط (الوضع الافتراضي السابق)، أو لوحة معلومات مختصرة، أو شاشة
+// ترحيب بسيطة بدون أي بيانات (مفيدة لو ما يريد رئيس الموقع أن يشوف الزوّار
+// أي شيء من المخزون قبل تسجيل الدخول).
+function GuestScreenSettingsModal({ data, onSave, onClose }) {
+  const [screen, setScreen] = useState(data.guestScreen || "inventory");
+  const [welcomeText, setWelcomeText] = useState(data.guestWelcomeText || "");
+
+  const OPTIONS = [
+    { key: "inventory", title: "المخزون (قراءة فقط)", hint: "يشوف الزائر كل الأصناف وأرصدتها، بدون إمكانية تعديل — هذا كان السلوك الافتراضي" },
+    { key: "dashboard", title: "لوحة معلومات مختصرة", hint: "إحصائيات عامة فقط (عدد الأصناف، حالات النقص...) بدون تفاصيل كل صنف" },
+    { key: "welcome", title: "شاشة ترحيب فقط", hint: "لا تُعرض أي بيانات مخزون إطلاقاً — فقط شعار الموقع ورسالة ترحيب وزر الدخول" },
+  ];
+
+  return (
+    <Modal title="إعدادات شاشة البداية" onClose={onClose}>
+      <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+        <p style={{ fontSize: 12.5, color: "var(--ink-soft)", margin: 0 }}>
+          هذا يحدد أول شيء يشوفه أي شخص يفتح رابط الموقع، قبل ما يسجّل دخول.
+        </p>
+        {OPTIONS.map((o) => (
+          <label key={o.key} className="notif-option" style={{
+            display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px",
+            border: `1px solid ${screen === o.key ? "var(--navy)" : "var(--line)"}`,
+            borderRadius: 10, cursor: "pointer", background: screen === o.key ? "var(--chip-bg)" : "transparent",
+          }}>
+            <input type="radio" name="guest-screen" checked={screen === o.key} onChange={() => setScreen(o.key)} style={{ marginTop: 3 }} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13.5 }}>{o.title}</div>
+              <div style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 2 }}>{o.hint}</div>
+            </div>
+          </label>
+        ))}
+        {screen === "welcome" && (
+          <Field label="رسالة الترحيب (اختياري)">
+            <textarea
+              className="input" rows={3} value={welcomeText}
+              onChange={(e) => setWelcomeText(e.target.value)}
+              placeholder="مثال: مرحباً بك — لعرض المخزون أو التعديل، سجّل الدخول من الزر أدناه."
+            />
+          </Field>
+        )}
+        <div className="modal-actions">
+          <button className="btn-ghost" onClick={onClose}>إلغاء</button>
+          <button className="btn-primary" onClick={() => { onSave({ guestScreen: screen, guestWelcomeText: welcomeText }); onClose(); }}>
+            <Check size={15} /> حفظ
+          </button>
+        </div>
       </div>
     </Modal>
   );
@@ -4913,6 +5198,7 @@ function App() {
   // إعدادات تنبيهات رئيس الموقع (خاصة بهذا الجهاز/المتصفح)
   const [notifSettings, setNotifSettingsState] = useState(() => getNotifSettings());
   const [showNotifSettings, setShowNotifSettings] = useState(false);
+  const [showGuestScreenSettings, setShowGuestScreenSettings] = useState(false);
   const setNotifSettings = (level) => {
     const next = { ...notifSettings, level };
     setNotifSettingsState(next);
@@ -5076,7 +5362,13 @@ function App() {
         </header>
 
         <main className="view-main">
-          <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} />
+          {data.guestScreen === "welcome" ? (
+            <GuestWelcomeScreen text={data.guestWelcomeText} />
+          ) : data.guestScreen === "dashboard" ? (
+            <GuestDashboardSummary inventory={inventory} />
+          ) : (
+            <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} />
+          )}
         </main>
 
         {showControlLogin && (
@@ -5196,6 +5488,11 @@ function App() {
               <Bell size={17} />
             </button>
           )}
+          {isOwner && !isRestrictedOwner && (
+            <button className="icon-btn" title="إعدادات شاشة البداية" onClick={() => setShowGuestScreenSettings(true)}>
+              <Monitor size={17} />
+            </button>
+          )}
           <button className="topbar-logout-btn" onClick={logout} title="تسجيل الخروج">
             <X size={15} /> <span>تسجيل الخروج</span>
           </button>
@@ -5240,6 +5537,17 @@ function App() {
           onClose={() => setShowNotifSettings(false)}
           onSave={(level) => setNotifSettings(level)}
           ownerId={isOwner ? session.ownerId : null}
+        />
+      )}
+
+      {showGuestScreenSettings && (
+        <GuestScreenSettingsModal
+          data={data}
+          onClose={() => setShowGuestScreenSettings(false)}
+          onSave={({ guestScreen, guestWelcomeText }) => {
+            setData({ ...data, guestScreen, guestWelcomeText });
+            notify("تم حفظ إعدادات شاشة البداية");
+          }}
         />
       )}
 
@@ -5727,6 +6035,7 @@ function FontStyles() {
       .box-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); background: var(--chip-bg); border-radius: 999px; padding: 2px 8px; margin-inline-start: 6px; }
       .field-full { grid-column: 1 / -1; }
       .field-label { font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+      .field-hint { font-size: 11px; color: var(--ink-soft); opacity: 0.85; line-height: 1.5; }
       .perm-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
       .perm-toolbar-btn {
         font-size: 11.5px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line);
@@ -6008,6 +6317,13 @@ function FontStyles() {
       .cat-list-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--ink-soft); }
       .cat-list-row { display: flex; flex-wrap: wrap; gap: 8px; }
       .cat-count { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; opacity: 0.7; margin-inline-start: 4px; }
+      .cat-branch-group { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--line-soft); }
+      .cat-branch-group:first-of-type { border-top: none; padding-top: 0; }
+      .cat-branch-label { font-size: 11px; font-weight: 700; color: var(--ink-soft); }
+
+      /* تلميح "تم التعرف عليه من قائمة الباركودات" أسفل حقل الكود بنموذج
+         إضافة الصنف */
+      .barcode-match-hint { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--olive); margin-top: 6px; }
 
       /* ---------- الأنشطة المؤقتة ---------- */
       .activity-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
