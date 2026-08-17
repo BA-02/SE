@@ -132,7 +132,8 @@ import {
   Search, Plus, Minus, Trash2, Pencil, X, Check, AlertTriangle, TriangleAlert,
   ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert,
   Users, KeyRound, Layers, Shuffle, Eye, EyeOff, Bell, RotateCcw, Sun, Moon, Monitor, ClipboardList,
-  BarChart3, PieChart, Percent, TrendingUp, ListChecks, Briefcase, Undo2, Tags
+  BarChart3, PieChart, Percent, TrendingUp, ListChecks, Briefcase, Undo2, Tags,
+  Upload, FolderOpen, HardDriveDownload
 } from "lucide-react";
 import JsBarcode from "https://esm.sh/jsbarcode@3.11.6";
 
@@ -827,21 +828,150 @@ function daysSinceBackup() {
     return (Date.now() - Number(raw)) / (24 * 3600 * 1000);
   } catch { return Infinity; }
 }
-function downloadFullBackup(data) {
+function downloadFullBackup(data, auditLog) {
   const payload = {
     exportedAt: new Date().toISOString(),
-    items: data.items, incoming: data.incoming, outgoing: data.outgoing,
-    barcodes: data.barcodes, users: data.users, itemGroups: data.itemGroups,
-    branches: data.branches, tasks: data.tasks, activities: data.activities,
+    fullSiteBackup: true,
+    ...FULL_BACKUP_FIELDS.reduce((acc, f) => { acc[f] = data[f]; return acc; }, {}),
+    auditLog: Array.isArray(auditLog) ? auditLog : undefined,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `نسخة_احتياطية_${todayISO()}.json`;
+  a.download = `نسخة_احتياطية_كاملة_${todayISO()}.json`;
   a.click();
   URL.revokeObjectURL(url);
   markBackupDone();
+  return payload;
+}
+
+/* ------------------------------------------------------------------ */
+/*  استيراد نسخة احتياطية (JSON) من جهاز رئيس الموقع — يقرأ الملف الذي    */
+/*  نزّله downloadFullBackup سابقاً، ويستبدل به كل معلومات الموقع: الأصناف  */
+/*  والحركات والمستخدمين والمجموعات والأقسام والمهام، وأيضاً حسابات        */
+/*  الرؤساء وكلمات مرورهم وإعدادات شاشة البداية وسجل النشاط — أي كل شيء   */
+/*  محفوظ بالملف. تنبيه: الملف نفسه يحتوي كلمات المرور نصّاً صريحاً،        */
+/*  فاحفظه بمكان آمن.                                                     */
+/* ------------------------------------------------------------------ */
+const FULL_BACKUP_FIELDS = [
+  "items", "incoming", "outgoing", "barcodes", "users", "itemGroups",
+  "branches", "tasks", "activities", "owners", "guestScreen", "guestWelcomeText",
+];
+
+function parseBackupFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || typeof parsed !== "object" || !FULL_BACKUP_FIELDS.some((f) => parsed[f] !== undefined)) {
+          reject(new Error("الملف لا يبدو نسخة احتياطية صالحة من هذا الموقع"));
+          return;
+        }
+        resolve(parsed);
+      } catch {
+        reject(new Error("تعذّر قراءة الملف — تأكد أنه ملف JSON صالح"));
+      }
+    };
+    reader.onerror = () => reject(new Error("تعذّر قراءة الملف"));
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+function mergeBackupIntoData(currentData, backupPayload) {
+  const next = { ...currentData };
+  FULL_BACKUP_FIELDS.forEach((f) => {
+    if (backupPayload[f] !== undefined) next[f] = backupPayload[f];
+  });
+  return withDefaults(next);
+}
+
+/* ------------------------------------------------------------------ */
+/*  نسخ احتياطي تلقائي محلي على جهاز رئيس الموقع (File System Access    */
+/*  API) — يختار رئيس الموقع مجلداً على جهازه مرة واحدة، والموقع يكتب     */
+/*  ملف نسخة احتياطية بداخله تلقائياً كل فترة يحددها، بدون أي نافذة       */
+/*  حفظ تظهر كل مرة. تعمل حالياً فقط على متصفحات تدعم هذه الميزة          */
+/*  (Chrome/Edge على الكمبيوتر بالدرجة الأولى)، وفقط أثناء فتح الموقع     */
+/*  فعلياً بالمتصفح — لا يوجد تطبيق يعمل بالخلفية.                        */
+const AUTO_BACKUP_DB = "warehouse-auto-backup-db";
+const AUTO_BACKUP_STORE = "handles";
+const AUTO_BACKUP_SETTINGS_KEY = "warehouse-auto-backup-settings-v1";
+const AUTO_BACKUP_LAST_KEY = "warehouse-auto-backup-last-v1";
+
+function isAutoBackupSupported() {
+  return typeof window !== "undefined" && "showDirectoryPicker" in window && typeof indexedDB !== "undefined";
+}
+
+function openHandleDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(AUTO_BACKUP_DB, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(AUTO_BACKUP_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function saveDirHandle(handle) {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUTO_BACKUP_STORE, "readwrite");
+    tx.objectStore(AUTO_BACKUP_STORE).put(handle, "backup-dir");
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function getDirHandle() {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUTO_BACKUP_STORE, "readonly");
+    const req = tx.objectStore(AUTO_BACKUP_STORE).get("backup-dir");
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function clearDirHandle() {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUTO_BACKUP_STORE, "readwrite");
+    tx.objectStore(AUTO_BACKUP_STORE).delete("backup-dir");
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function getAutoBackupSettings() {
+  try {
+    const raw = localStorage.getItem(AUTO_BACKUP_SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : { enabled: false, everyDays: 1 };
+  } catch { return { enabled: false, everyDays: 1 }; }
+}
+function saveAutoBackupSettings(s) {
+  try { localStorage.setItem(AUTO_BACKUP_SETTINGS_KEY, JSON.stringify(s)); } catch {}
+}
+function daysSinceAutoBackup() {
+  try {
+    const raw = localStorage.getItem(AUTO_BACKUP_LAST_KEY);
+    if (!raw) return Infinity;
+    return (Date.now() - Number(raw)) / (24 * 3600 * 1000);
+  } catch { return Infinity; }
+}
+function markAutoBackupDone() {
+  try { localStorage.setItem(AUTO_BACKUP_LAST_KEY, String(Date.now())); } catch {}
+}
+
+// يكتب ملف نسخة احتياطية جديد داخل المجلد المختار — يفترض أن الإذن ممنوح مسبقاً
+async function writeAutoBackupFile(dirHandle, data, auditLog) {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    fullSiteBackup: true,
+    ...FULL_BACKUP_FIELDS.reduce((acc, f) => { acc[f] = data[f]; return acc; }, {}),
+    auditLog: Array.isArray(auditLog) ? auditLog : undefined,
+  };
+  const fileHandle = await dirHandle.getFileHandle(`نسخة_احتياطية_تلقائية_${todayISO()}.json`, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(JSON.stringify(payload, null, 2));
+  await writable.close();
+  markAutoBackupDone();
 }
 
 /* ------------------------------------------------------------------ */
@@ -4577,6 +4707,206 @@ function ControlLoginModal({ onEnter, onClose, data }) {
   );
 }
 
+// نافذة «النسخ الاحتياطي والاستعادة» — لرئيس الموقع بتحكم كامل فقط، لأنها
+// تتيح استبدال كل بيانات المخزون دفعة واحدة (عملية حسّاسة).
+function BackupSettingsModal({ data, auditLog, notify, onClose, onRestore }) {
+  const [importing, setImporting] = useState(false);
+  const [pendingBackup, setPendingBackup] = useState(null); // { payload, fileName } بانتظار تأكيد المستخدم
+  const fileInputRef = React.useRef(null);
+
+  const supported = isAutoBackupSupported();
+  const [autoSettings, setAutoSettings] = useState(() => getAutoBackupSettings());
+  const [dirName, setDirName] = useState(null);
+  const [dirBusy, setDirBusy] = useState(false);
+  const [dirError, setDirError] = useState("");
+  const [lastAutoDays, setLastAutoDays] = useState(() => daysSinceAutoBackup());
+
+  useEffect(() => {
+    if (!supported) return;
+    getDirHandle().then((h) => setDirName(h?.name || null)).catch(() => {});
+  }, [supported]);
+
+  const pickFolder = async () => {
+    setDirBusy(true);
+    setDirError("");
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      await saveDirHandle(handle);
+      setDirName(handle.name);
+      const next = { ...autoSettings, enabled: true };
+      setAutoSettings(next);
+      saveAutoBackupSettings(next);
+      notify("تم اختيار المجلد — ستُحفظ النسخ الاحتياطية بداخله تلقائياً");
+    } catch (e) {
+      if (e?.name !== "AbortError") setDirError("تعذّر اختيار المجلد");
+    } finally {
+      setDirBusy(false);
+    }
+  };
+
+  const stopAuto = async () => {
+    await clearDirHandle().catch(() => {});
+    setDirName(null);
+    const next = { ...autoSettings, enabled: false };
+    setAutoSettings(next);
+    saveAutoBackupSettings(next);
+  };
+
+  const setFrequency = (everyDays) => {
+    const next = { ...autoSettings, everyDays };
+    setAutoSettings(next);
+    saveAutoBackupSettings(next);
+  };
+
+  const backupNow = async () => {
+    setDirBusy(true);
+    setDirError("");
+    try {
+      const handle = await getDirHandle();
+      if (!handle) { setDirError("اختر مجلداً أولاً"); return; }
+      const perm = await handle.queryPermission({ mode: "readwrite" });
+      if (perm !== "granted") {
+        const req = await handle.requestPermission({ mode: "readwrite" });
+        if (req !== "granted") { setDirError("لم يُمنح إذن الكتابة على المجلد"); return; }
+      }
+      await writeAutoBackupFile(handle, data, auditLog);
+      setLastAutoDays(0);
+      notify("تم حفظ نسخة احتياطية بالمجلد المختار");
+    } catch (e) {
+      setDirError("تعذّر الحفظ — قد تحتاج تختار المجلد من جديد");
+    } finally {
+      setDirBusy(false);
+    }
+  };
+
+  const onFileChosen = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    try {
+      const payload = await parseBackupFile(file);
+      setPendingBackup({ payload, fileName: file.name });
+    } catch (err) {
+      notify(err.message || "تعذّر قراءة الملف", "error");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const confirmRestore = () => {
+    if (!pendingBackup) return;
+    onRestore(pendingBackup.payload);
+    setPendingBackup(null);
+    onClose();
+  };
+
+  return (
+    <Modal title="النسخ الاحتياطي والاستعادة" onClose={onClose}>
+      <div className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 4 }}>تنزيل نسخة احتياطية كاملة الآن</div>
+          <p style={{ fontSize: 12, color: "var(--ink-soft)", margin: "0 0 8px" }}>
+            ملف JSON واحد يحتوي <strong>كل</strong> معلومات الموقع: الأصناف والحركات والباركودات والمستخدمين
+            والمجموعات والأقسام والمهام والأنشطة، وأيضاً حسابات الرؤساء وكلمات مرورهم وإعدادات شاشة البداية
+            وسجل النشاط.
+          </p>
+          <p style={{ fontSize: 11.5, color: "var(--red, #c92a2a)", margin: "0 0 8px" }}>
+            تنبيه: الملف يحتوي كلمات المرور نصّاً صريحاً غير مشفّر — احفظه بمكان آمن ولا ترسله لأي شخص لا تثق فيه.
+          </p>
+          <button className="btn-ghost" onClick={() => downloadFullBackup(data, auditLog)}>
+            <Download size={15} /> تنزيل الآن
+          </button>
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 4 }}>استيراد نسخة احتياطية كاملة</div>
+          <p style={{ fontSize: 12, color: "var(--ink-soft)", margin: "0 0 8px" }}>
+            يستبدل <strong>كل</strong> معلومات الموقع الحالية بما في الملف — شامل حسابات الرؤساء وكلمات المرور
+            وإعدادات شاشة البداية وسجل النشاط، إن كانت موجودة بالملف.
+          </p>
+          <input ref={fileInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={onFileChosen} />
+          <button className="btn-ghost" disabled={importing} onClick={() => fileInputRef.current?.click()}>
+            <Upload size={15} /> {importing ? "جارٍ القراءة…" : "اختيار ملف نسخة احتياطية"}
+          </button>
+
+          {pendingBackup && (
+            <div className="alert alert-error" style={{ marginTop: 10 }}>
+              <AlertTriangle size={15} />
+              <div>
+                <div>
+                  سيتم استبدال <strong>كل</strong> معلومات الموقع الحالية بمحتوى الملف «{pendingBackup.fileName}»
+                  {pendingBackup.payload.exportedAt ? ` (بتاريخ ${new Date(pendingBackup.payload.exportedAt).toLocaleDateString("ar")})` : ""}
+                  {pendingBackup.payload.owners ? " — بما في ذلك حسابات الرؤساء وكلمات المرور" : ""}.
+                  هذا الإجراء لا يمكن التراجع عنه إلا باستعادة نسخة أخرى، وقد يسجّل خروجك من هذا الحساب لو تغيّرت كلمة مروره.
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button className="btn-ghost" onClick={() => setPendingBackup(null)}>إلغاء</button>
+                  <button className="btn-primary" onClick={confirmRestore}><Check size={14} /> نعم، استبدل كل البيانات</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 4 }}>نسخة احتياطية تلقائية على هذا الجهاز</div>
+          {!supported ? (
+            <p style={{ fontSize: 12, color: "var(--ink-soft)", margin: 0 }}>
+              هذه الميزة تحتاج متصفح يدعم اختيار مجلد على الجهاز مباشرة (Chrome أو Edge على كمبيوتر، عبر اتصال https).
+              غير مدعومة حالياً على هذا المتصفح أو الجهاز — استخدم «تنزيل نسخة احتياطية الآن» يدوياً بدلاً منها.
+            </p>
+          ) : (
+            <>
+              <p style={{ fontSize: 12, color: "var(--ink-soft)", margin: "0 0 8px" }}>
+                اختر مجلداً على جهازك مرة واحدة، وسيحفظ الموقع بداخله ملف نسخة احتياطية تلقائياً كل ما فتحت الموقع بعد المدة التي تحددها — بدون أي نافذة حفظ تظهر لك في كل مرة. تعمل فقط أثناء فتح الموقع فعلياً بهذا المتصفح على هذا الجهاز (وليس بالخلفية إذا كان المتصفح مغلقاً بالكامل).
+              </p>
+
+              {dirName ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 5 }}>
+                    <FolderOpen size={14} /> المجلد: <strong>{dirName}</strong>
+                  </span>
+                  <button className="btn-ghost" disabled={dirBusy} onClick={backupNow}>
+                    <HardDriveDownload size={14} /> نسخ الآن
+                  </button>
+                  <button className="btn-ghost" onClick={stopAuto}>إيقاف</button>
+                </div>
+              ) : (
+                <button className="btn-ghost" disabled={dirBusy} onClick={pickFolder}>
+                  <FolderOpen size={15} /> اختيار مجلد على هذا الجهاز
+                </button>
+              )}
+
+              {dirName && (
+                <div style={{ marginTop: 10 }}>
+                  <Field label="كل كم مدة يأخذ نسخة تلقائية؟">
+                    <select className="input" value={autoSettings.everyDays} onChange={(e) => setFrequency(Number(e.target.value))}>
+                      <option value={1}>كل يوم (عند أول فتح للموقع بذلك اليوم)</option>
+                      <option value={3}>كل 3 أيام</option>
+                      <option value={7}>كل أسبوع</option>
+                    </select>
+                  </Field>
+                  <div style={{ fontSize: 11.5, color: "var(--ink-soft)" }}>
+                    {lastAutoDays === Infinity ? "لم تُؤخذ نسخة تلقائية بعد" : `آخر نسخة تلقائية: منذ ${Math.floor(lastAutoDays)} يوم تقريباً`}
+                  </div>
+                </div>
+              )}
+
+              {dirError && <div className="alert alert-error" style={{ marginTop: 8 }}><AlertTriangle size={14} /> {dirError}</div>}
+            </>
+          )}
+        </div>
+
+        <div className="modal-actions">
+          <button className="btn-ghost" onClick={onClose}>إغلاق</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // نافذة إعدادات التنبيهات — لرئيس الموقع فقط
 function NotificationSettingsModal({ settings, onSave, onClose, ownerId }) {
   const [level, setLevel] = useState(settings.level);
@@ -5178,6 +5508,14 @@ function App() {
     window.storage?.set(AUDIT_KEY, JSON.stringify(next), false).catch(() => {});
   }, []);
 
+  // استعادة سجل النشاط بالكامل من نسخة احتياطية مستوردة (لو كانت موجودة بالملف)
+  const restoreAuditLog = useCallback((list) => {
+    if (!Array.isArray(list)) return;
+    auditLogRef.current = list;
+    setAuditLog(list);
+    window.storage?.set(AUDIT_KEY, JSON.stringify(list), false).catch(() => {});
+  }, []);
+
   const notify = useCallback((msg, type = "success", opts = {}) => {
     setToast({ msg, type, id: Date.now() });
     if (!opts.silent) { playBeep(type === "error" ? "error" : "success"); hapticPulse(type === "error" ? "error" : "success"); }
@@ -5193,12 +5531,34 @@ function App() {
 
   const [data, setData, saving, sync] = useStore(onRemoteUpdate);
 
+  // نسخ احتياطي تلقائي محلي: لو رئيس الموقع سبق واختار مجلداً على هذا
+  // الجهاز، وحان وقت النسخة التالية (حسب المدة التي حددها)، نكتب الملف
+  // تلقائياً بدون أي تدخل منه — بصمت، ودون إزعاجه لو تعذّر ذلك.
+  useEffect(() => {
+    if (session.type !== "owner" || !data || !isAutoBackupSupported()) return;
+    (async () => {
+      try {
+        const settings = getAutoBackupSettings();
+        if (!settings.enabled) return;
+        if (daysSinceAutoBackup() < (settings.everyDays || 1)) return;
+        const handle = await getDirHandle();
+        if (!handle) return;
+        const perm = await handle.queryPermission({ mode: "readwrite" });
+        if (perm !== "granted") return; // ما نقدر نطلب الإذن بدون تفاعل مباشر من المستخدم
+        await writeAutoBackupFile(handle, data, auditLogRef.current);
+      } catch {
+        // نتجاهل أي خطأ هنا بصمت — رئيس الموقع يقدر يتأكد ويأخذ نسخة يدوية من نافذة النسخ الاحتياطي
+      }
+    })();
+  }, [session.type, data]);
+
   const inventory = useMemo(() => (data ? computeInventory(data) : []), [data]);
 
   // إعدادات تنبيهات رئيس الموقع (خاصة بهذا الجهاز/المتصفح)
   const [notifSettings, setNotifSettingsState] = useState(() => getNotifSettings());
   const [showNotifSettings, setShowNotifSettings] = useState(false);
   const [showGuestScreenSettings, setShowGuestScreenSettings] = useState(false);
+  const [showBackupSettings, setShowBackupSettings] = useState(false);
   const setNotifSettings = (level) => {
     const next = { ...notifSettings, level };
     setNotifSettingsState(next);
@@ -5488,9 +5848,14 @@ function App() {
               <Bell size={17} />
             </button>
           )}
-          {isOwner && !isRestrictedOwner && (
+          {isOwner && (
             <button className="icon-btn" title="إعدادات شاشة البداية" onClick={() => setShowGuestScreenSettings(true)}>
               <Monitor size={17} />
+            </button>
+          )}
+          {isOwner && (
+            <button className="icon-btn" title="النسخ الاحتياطي والاستعادة" onClick={() => setShowBackupSettings(true)}>
+              <HardDriveDownload size={17} />
             </button>
           )}
           <button className="topbar-logout-btn" onClick={logout} title="تسجيل الخروج">
@@ -5547,6 +5912,20 @@ function App() {
           onSave={({ guestScreen, guestWelcomeText }) => {
             setData({ ...data, guestScreen, guestWelcomeText });
             notify("تم حفظ إعدادات شاشة البداية");
+          }}
+        />
+      )}
+
+      {showBackupSettings && (
+        <BackupSettingsModal
+          data={data}
+          auditLog={auditLog}
+          notify={notify}
+          onClose={() => setShowBackupSettings(false)}
+          onRestore={(payload) => {
+            setData(mergeBackupIntoData(data, payload));
+            if (Array.isArray(payload.auditLog)) restoreAuditLog(payload.auditLog);
+            notify("تم استيراد النسخة الاحتياطية الكاملة بنجاح");
           }}
         />
       )}
