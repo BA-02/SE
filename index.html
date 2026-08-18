@@ -27,7 +27,7 @@
   - يمكن فتح هذا الملف مباشرة بالمتصفح (فقط بالنقر عليه مرتين)
     أو رفعه لأي استضافة عادية (GitHub Pages, Netlify, Vercel,
     استضافة مشتركة عادية...الخ) كملف index.html واحد.
-  - البيانات تُحفظ الآن على Supabase وتتزامن
+  - البيانات تُحفظ الآن على Firebase (Firestore) وتتزامن
     تلقائياً وفوراً بين كل الأجهزة التي تفتح نفس هذا الملف —
     أي تعديل على جهاز يظهر مباشرة على بقية الأجهزة بدون تحديث الصفحة.
   - المكتبات (React / lucide-react) تُحمَّل من شبكة توصيل
@@ -55,73 +55,71 @@
 <body>
 <div id="root"></div>
 
-<!-- طبقة تخزين سحابية: Supabase (PostgreSQL + Realtime) -->
+<!-- طبقة تخزين سحابية: Firebase (Firestore + Realtime عبر onSnapshot) -->
 <script type="module">
-  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot,
+    collection, query, where, orderBy, getDocs, documentId, serverTimestamp,
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
-  // بيانات مشروع Supabase
-  const SUPABASE_URL = "https://beezqxxltabbmfqdyxne.supabase.co";
-  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_cCO8hXnwLocQfw5SGTjDtw_3ZQAZDvO";
+  // بيانات مشروع Firebase
+  const firebaseConfig = {
+    apiKey: "AIzaSyAwc6GuzbSEPfRv8Pfgcd29lR1OWXk3GH8",
+    authDomain: "store-986fb.firebaseapp.com",
+    projectId: "store-986fb",
+    storageBucket: "store-986fb.firebasestorage.app",
+    messagingSenderId: "362331275374",
+    appId: "1:362331275374:web:7ccb149051f34a7860a67f",
+    measurementId: "G-HW6Q4SBNHE",
+  };
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-  const TABLE = "warehouse_state";
+  const firebaseApp = initializeApp(firebaseConfig);
+  const db = getFirestore(firebaseApp);
+  const COLLECTION = "warehouse_state";
 
   window.storage = {
     async get(key) {
-      const { data, error } = await supabase
-        .from(TABLE)
-        .select("key,value")
-        .eq("key", key)
-        .maybeSingle();
-      if (error) throw error;
-      if (!data) return null;
-      return { key: data.key, value: data.value };
+      const ref = doc(db, COLLECTION, key);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return null;
+      const data = snap.data();
+      return { key, value: data.value };
     },
     async set(key, value) {
-      const { error } = await supabase
-        .from(TABLE)
-        .upsert({ key, value: String(value), updated_at: new Date().toISOString() }, { onConflict: "key" });
-      if (error) throw error;
+      const ref = doc(db, COLLECTION, key);
+      await setDoc(ref, { key, value: String(value), updated_at: serverTimestamp() });
       return { key, value };
     },
     async delete(key) {
-      const { data, error } = await supabase
-        .from(TABLE)
-        .delete()
-        .eq("key", key)
-        .select("key")
-        .maybeSingle();
-      if (error) throw error;
-      return { key, deleted: !!data };
+      const ref = doc(db, COLLECTION, key);
+      const snap = await getDoc(ref);
+      const existed = snap.exists();
+      if (existed) await deleteDoc(ref);
+      return { key, deleted: existed };
     },
     async list(prefix) {
-      let q = supabase.from(TABLE).select("key");
-      if (prefix) q = q.like("key", `${prefix}%`);
-      const { data, error } = await q;
-      if (error) throw error;
-      return { keys: (data || []).map(r => r.key), prefix };
-    }
+      const colRef = collection(db, COLLECTION);
+      const q = prefix
+        ? query(colRef, orderBy(documentId()), where(documentId(), ">=", prefix), where(documentId(), "<", prefix + "\uf8ff"))
+        : colRef;
+      const snap = await getDocs(q);
+      return { keys: snap.docs.map((d) => d.id), prefix };
+    },
   };
 
-  // مزامنة فورية بين جميع الأجهزة عبر Supabase Realtime
+  // مزامنة فورية بين جميع الأجهزة عبر Firestore onSnapshot
   window.subscribeStorage = function (key, callback) {
-    const channel = supabase
-      .channel(`warehouse-state-${key}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: TABLE, filter: `key=eq.${key}` },
-        (payload) => {
-          if (payload.eventType === "DELETE") return;
-          const row = payload.new;
-          if (row && row.key === key) callback(row.value, false);
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
+    const ref = doc(db, COLLECTION, key);
+    const unsub = onSnapshot(ref, { includeMetadataChanges: false }, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      callback(data.value, false);
+    });
+    return unsub;
   };
 
-  window.supabase = supabase;
+  window.firebaseApp = firebaseApp;
 </script>
 
 <script type="text/babel" data-type="module" data-presets="react">
@@ -307,8 +305,26 @@ function withDefaults(d) {
     activities: Array.isArray(d.activities) ? d.activities : [],
     // الشاشة التي تظهر لأي زائر يفتح الموقع قبل تسجيل الدخول (وضع العرض) —
     // يتحكم بها رئيس الموقع فقط من «إعدادات شاشة البداية»
-    guestScreen: ["inventory", "dashboard", "welcome"].includes(d.guestScreen) ? d.guestScreen : "inventory",
+    guestScreen: ["inventory", "dashboard", "welcome", "lists"].includes(d.guestScreen) ? d.guestScreen : "inventory",
     guestWelcomeText: typeof d.guestWelcomeText === "string" ? d.guestWelcomeText : "",
+    // إعدادات وضع «قوائم الأقسام/المواقع» بشاشة البداية: أي قائمة تظهر،
+    // عنوان كل قائمة، وعنوان مخصص اختياري لكل قسم/موقع بالداخل (يُستخدم فقط
+    // بهذه الشاشة، لا يغيّر الاسم الحقيقي للقسم/الموقع بباقي الموقع)
+    // إعدادات وضع «قوائم الأقسام/المواقع» بشاشة البداية: أي قائمة تظهر،
+    // عنوان كل قائمة، وعنوان مخصص اختياري لكل قسم/موقع بالداخل (يُستخدم فقط
+    // بهذه الشاشة، لا يغيّر الاسم الحقيقي للقسم/الموقع بباقي الموقع)
+    guestListsConfig: {
+      showSections: true,
+      sectionsTitle: "قائمة الأقسام",
+      showLocations: true,
+      locationsTitle: "قائمة المواقع",
+      // هل يظهر جدول المخزون الكامل تحت القوائم بهذه الشاشة أم لا (افتراضياً
+      // يظهر، حفاظاً على السلوك القديم قبل إضافة هذا الخيار)
+      showInventoryTable: true,
+      ...(d.guestListsConfig && typeof d.guestListsConfig === "object" ? d.guestListsConfig : {}),
+      sectionTitles: (d.guestListsConfig && typeof d.guestListsConfig.sectionTitles === "object" && d.guestListsConfig.sectionTitles) || {},
+      locationTitles: (d.guestListsConfig && typeof d.guestListsConfig.locationTitles === "object" && d.guestListsConfig.locationTitles) || {},
+    },
   };
 }
 
@@ -381,8 +397,8 @@ function parseCSV(text) {
 
 const STORE_KEY = "warehouse-data-v1";
 const AUDIT_KEY = "warehouse-audit-log-v1";
-// Data now lives in Supabase and syncs in real time across devices
-// (laptop, phone, tablet) via window.subscribeStorage — see the Supabase layer above.
+// Data now lives in Firebase (Firestore) and syncs in real time across devices
+// (laptop, phone, tablet) via window.subscribeStorage — see the Firebase layer above.
 
 function useStore(onRemoteUpdate) {
   const [data, setData] = useState(null);
@@ -712,6 +728,11 @@ async function subscribeToPush(ownerId) {
     });
   }
 
+  // ملاحظة: التنبيهات اللحظية (Push) ما زالت تعتمد على Supabase (جدول
+  // push_subscriptions + Edge Function) ولم تُرحَّل لفايربيس بعد — هذا الجزء
+  // معطّل مؤقتاً حتى تُعاد كتابته لاحقاً (Cloud Functions أو بديل مشابه).
+  if (!window.supabase) throw new Error("التنبيهات اللحظية غير مفعّلة حالياً بعد الانتقال لفايربيس");
+
   const json = sub.toJSON();
   const { error } = await window.supabase.from("push_subscriptions").upsert(
     {
@@ -734,7 +755,9 @@ async function unsubscribeFromPush() {
   if (!reg) return;
   const sub = await reg.pushManager.getSubscription();
   if (!sub) return;
-  try { await window.supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint); } catch {}
+  if (window.supabase) {
+    try { await window.supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint); } catch {}
+  }
   await sub.unsubscribe();
 }
 
@@ -856,7 +879,7 @@ function downloadFullBackup(data, auditLog) {
 /* ------------------------------------------------------------------ */
 const FULL_BACKUP_FIELDS = [
   "items", "incoming", "outgoing", "barcodes", "users", "itemGroups",
-  "branches", "tasks", "activities", "owners", "guestScreen", "guestWelcomeText",
+  "branches", "tasks", "activities", "owners", "guestScreen", "guestWelcomeText", "guestListsConfig",
 ];
 
 function parseBackupFile(file) {
@@ -2941,7 +2964,7 @@ function StockOutPage(props) {
 /*  INVENTORY PAGE                                                     */
 /* ------------------------------------------------------------------ */
 
-function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, isOwner, focusCode, onFocusConsumed }) {
+function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, isOwner, focusCode, onFocusConsumed, hideLocationsPanel, hideLocationFilter, showBranchFilter, quickFilter }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locationFilter, setLocationFilter] = useState("all");
@@ -2972,6 +2995,21 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
     }, 80);
     return () => clearTimeout(t);
   }, [focusCode]);
+
+  // ضغطة على قسم/موقع بقائمة "الأقسام/المواقع" أعلى الشاشة (لدى الزوّار) —
+  // تفلتر جدول المخزون تلقائياً وتنزل له
+  useEffect(() => {
+    if (!quickFilter) return;
+    if (quickFilter.kind === "branch") {
+      setBranchFilter(quickFilter.branchId || "all");
+      setLocationFilter("all");
+    } else if (quickFilter.kind === "location") {
+      setLocationFilter(quickFilter.loc || "all");
+      setBranchFilter(quickFilter.branchId || "all");
+    }
+    const el = document.getElementById("inventory-page-root");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [quickFilter]);
 
   const groupName = (id) => itemGroups.find((g) => g.id === id)?.name || "";
   const branchName = (id) => (branches || []).find((b) => b.id === id)?.name || "";
@@ -3049,7 +3087,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
   );
 
   return (
-    <div className="page">
+    <div className="page" id="inventory-page-root">
       <PageHeader eyebrow="الجرد" title="المخزون" />
 
       <div className="toolbar">
@@ -3078,13 +3116,13 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
             {itemGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         )}
-        {locations.length > 0 && (
+        {!hideLocationFilter && locations.length > 0 && (
           <select className="input location-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
             <option value="all">كل المواقع</option>
             {locations.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
           </select>
         )}
-        {isOwner && (branches || []).length > 0 && (
+        {(isOwner || showBranchFilter) && (branches || []).length > 0 && (
           <select className="input location-select" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
             <option value="all">كل الأقسام</option>
             {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -3105,7 +3143,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
         </button>
       </div>
 
-      {locations.length > 0 && (
+      {!hideLocationsPanel && locations.length > 0 && (
         <div className="panel cat-list-panel">
           <div className="cat-list-title"><MapPin size={14} /> قائمة المواقع</div>
           <div className="cat-list-row">
@@ -4611,6 +4649,160 @@ function GuestWelcomeScreen({ text }) {
   );
 }
 
+// شاشة "قوائم الأقسام/المواقع" لوضع العرض — تعرض للزائر (بدون تسجيل دخول)
+// قائمة الأقسام و/أو قائمة المواقع فقط (بدون جدول المخزون الكامل ولا أدوات
+// التصفية)، حسب ما يحدده رئيس الموقع من «إعدادات شاشة البداية»: أي قائمة
+// تظهر، عنوان كل قائمة، وعنوان مخصص اختياري لكل قسم/موقع بالداخل (هذا
+// العنوان يُستخدم بهذه الشاشة فقط، ولا يغيّر الاسم الحقيقي بباقي الموقع).
+function GuestListsScreen({ data, inventory, quickFilter, onSectionClick, onLocationClick }) {
+  const cfg = data.guestListsConfig || {};
+  const branches = data.branches || [];
+  const sectionTitles = cfg.sectionTitles || {};
+  const locationTitles = cfg.locationTitles || {};
+
+  const sectionLabel = (b) => sectionTitles[b.id]?.trim() || b.name || b.id;
+  const locationLabel = (branchId, loc) => locationTitles[`${branchId}::${loc}`]?.trim() || loc;
+
+  const isActiveBranch = (id) => quickFilter?.kind === "branch" && quickFilter.branchId === id;
+  const isActiveLocation = (branchId, loc) => quickFilter?.kind === "location" && quickFilter.branchId === branchId && quickFilter.loc === loc;
+
+  // إجمالي عدد الأصناف بكل قسم (لقائمة الأقسام)
+  const sectionCounts = React.useMemo(() => {
+    const m = {};
+    inventory.forEach((i) => { if (i.branch) m[i.branch] = (m[i.branch] || 0) + 1; });
+    return m;
+  }, [inventory]);
+
+  // المواقع مجمّعة حسب القسم (لقائمة المواقع) — نفس منطق صفحة المخزون
+  const locationGroups = React.useMemo(() => {
+    const byBranch = new Map();
+    inventory.forEach((i) => {
+      if (!i.category) return;
+      const bKey = i.branch || "";
+      if (!byBranch.has(bKey)) byBranch.set(bKey, new Map());
+      const inner = byBranch.get(bKey);
+      inner.set(i.category, (inner.get(i.category) || 0) + 1);
+    });
+    const groups = [...byBranch.entries()].map(([bKey, inner]) => {
+      const b = branches.find((x) => x.id === bKey);
+      return {
+        branchId: bKey,
+        branchLabel: bKey ? (b ? sectionLabel(b) : bKey) : "بدون قسم",
+        locations: [...inner.entries()]
+          .map(([loc, count]) => ({ loc, count }))
+          .sort((a, b2) => a.loc.localeCompare(b2.loc, "ar")),
+      };
+    });
+    groups.sort((a, b2) => {
+      if (!a.branchId) return 1;
+      if (!b2.branchId) return -1;
+      return a.branchLabel.localeCompare(b2.branchLabel, "ar");
+    });
+    return groups;
+  }, [inventory, branches, sectionTitles]);
+
+  const showSections = cfg.showSections !== false;
+  const showLocations = cfg.showLocations !== false;
+
+  if (!showSections && !showLocations) {
+    return (
+      <div style={{ textAlign: "center", padding: "40px 20px", color: "var(--ink-soft)", fontSize: 13.5 }}>
+        لا توجد قوائم مفعّلة للعرض حالياً.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {showSections && (
+        <div className="panel cat-list-panel">
+          <div className="cat-list-title"><MapPin size={14} /> {cfg.sectionsTitle?.trim() || "قائمة الأقسام"}</div>
+          <div className="cat-list-row">
+            {branches.map((b) => (
+              <button
+                key={b.id}
+                type="button"
+                className={`list-chip ${isActiveBranch(b.id) ? "list-chip-active" : ""}`}
+                onClick={() => onSectionClick && onSectionClick(b.id)}
+              >
+                {sectionLabel(b)} <span className="cat-count">{sectionCounts[b.id] || 0}</span>
+              </button>
+            ))}
+            {branches.length === 0 && <span style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>لا توجد أقسام مسجّلة بعد</span>}
+          </div>
+        </div>
+      )}
+      {showLocations && (
+        <div className="panel cat-list-panel">
+          <div className="cat-list-title"><MapPin size={14} /> {cfg.locationsTitle?.trim() || "قائمة المواقع"}</div>
+          <div className="cat-list-row">
+            <button
+              type="button"
+              className={`list-chip ${!quickFilter ? "list-chip-active" : ""}`}
+              onClick={() => onLocationClick && onLocationClick(null, null)}
+            >
+              كل المواقع <span className="cat-count">{inventory.length}</span>
+            </button>
+          </div>
+          {locationGroups.map((g) => (
+            <div className="cat-branch-group" key={g.branchId || "none"}>
+              <div className="cat-branch-label">{g.branchLabel}</div>
+              <div className="cat-list-row">
+                {g.locations.map(({ loc, count }) => (
+                  <button
+                    key={loc}
+                    type="button"
+                    className={`list-chip ${isActiveLocation(g.branchId, loc) ? "list-chip-active" : ""}`}
+                    onClick={() => onLocationClick && onLocationClick(g.branchId, loc)}
+                  >
+                    {locationLabel(g.branchId, loc)} <span className="cat-count">{count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {locationGroups.length === 0 && <span style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>لا توجد مواقع مسجّلة بعد</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// يجمع "قوائم الأقسام/المواقع" مع جدول المخزون تحتها، ويربطهم ببعض: ضغطة
+// على قسم أو موقع بالقائمة فوق تفلتر الجدول تلقائياً وتنزل له
+function GuestListsWithInventory({ data, inventory, triggerPrint }) {
+  const [quickFilter, setQuickFilter] = useState(null);
+  const seqRef = React.useRef(0);
+
+  const selectBranch = (branchId) => {
+    seqRef.current += 1;
+    setQuickFilter({ kind: "branch", branchId: branchId || "", seq: seqRef.current });
+  };
+  const selectLocation = (branchId, loc) => {
+    if (loc === null) { setQuickFilter(null); return; }
+    seqRef.current += 1;
+    setQuickFilter({ kind: "location", branchId: branchId || "", loc, seq: seqRef.current });
+  };
+
+  const showInventoryTable = data.guestListsConfig?.showInventoryTable !== false;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <GuestListsScreen data={data} inventory={inventory} quickFilter={quickFilter} onSectionClick={selectBranch} onLocationClick={selectLocation} />
+      {showInventoryTable && (
+        <InventoryPage
+          inventory={inventory} itemGroups={data.itemGroups} branches={data.branches}
+          onPrint={() => triggerPrint("inventory")}
+          hideLocationsPanel={data.guestListsConfig?.showLocations !== false}
+          hideLocationFilter
+          showBranchFilter
+          quickFilter={quickFilter}
+        />
+      )}
+    </div>
+  );
+}
+
 // إلى وضع التحكم والتعديل (مستخدم أو رئيس الموقع)، محمية بكلمة مرور
 function ControlLoginModal({ onEnter, onClose, data }) {
   const [mode, setMode] = useState(null); // null | 'owner' | 'user'
@@ -5051,11 +5243,56 @@ function GuestScreenSettingsModal({ data, onSave, onClose }) {
   const [screen, setScreen] = useState(data.guestScreen || "inventory");
   const [welcomeText, setWelcomeText] = useState(data.guestWelcomeText || "");
 
+  const savedCfg = data.guestListsConfig || {};
+  const [showSections, setShowSections] = useState(savedCfg.showSections !== false);
+  const [sectionsTitle, setSectionsTitle] = useState(savedCfg.sectionsTitle || "قائمة الأقسام");
+  const [sectionTitles, setSectionTitles] = useState({ ...(savedCfg.sectionTitles || {}) });
+  const [showLocations, setShowLocations] = useState(savedCfg.showLocations !== false);
+  const [locationsTitle, setLocationsTitle] = useState(savedCfg.locationsTitle || "قائمة المواقع");
+  const [locationTitles, setLocationTitles] = useState({ ...(savedCfg.locationTitles || {}) });
+  const [showInventoryTable, setShowInventoryTable] = useState(savedCfg.showInventoryTable !== false);
+
+  const branches = data.branches || [];
+  const branchName = (id) => branches.find((b) => b.id === id)?.name || "";
+
+  // كل المواقع (حقل category بكل صنف) مجمّعة حسب القسم، لعرض حقل عنوان
+  // مخصص لكل واحد منها — نفس التجميع المستخدم بشاشة العرض نفسها
+  const locationGroups = React.useMemo(() => {
+    const byBranch = new Map();
+    (data.items || []).forEach((i) => {
+      if (!i.category) return;
+      const bKey = i.branch || "";
+      if (!byBranch.has(bKey)) byBranch.set(bKey, new Set());
+      byBranch.get(bKey).add(i.category);
+    });
+    const groups = [...byBranch.entries()].map(([bKey, set]) => ({
+      branchId: bKey,
+      branchLabel: bKey ? (branchName(bKey) || bKey) : "بدون قسم",
+      locations: [...set].sort((a, b) => a.localeCompare(b, "ar")),
+    }));
+    groups.sort((a, b) => {
+      if (!a.branchId) return 1;
+      if (!b.branchId) return -1;
+      return a.branchLabel.localeCompare(b.branchLabel, "ar");
+    });
+    return groups;
+  }, [data.items, branches]);
+
   const OPTIONS = [
     { key: "inventory", title: "المخزون (قراءة فقط)", hint: "يشوف الزائر كل الأصناف وأرصدتها، بدون إمكانية تعديل — هذا كان السلوك الافتراضي" },
     { key: "dashboard", title: "لوحة معلومات مختصرة", hint: "إحصائيات عامة فقط (عدد الأصناف، حالات النقص...) بدون تفاصيل كل صنف" },
+    { key: "lists", title: "قوائم الأقسام/المواقع", hint: "تعرض قائمة الأقسام و/أو قائمة المواقع بالأعلى (بعناوين تحددها)، مع خيار لإظهار أو إخفاء جدول المخزون الكامل تحتها" },
     { key: "welcome", title: "شاشة ترحيب فقط", hint: "لا تُعرض أي بيانات مخزون إطلاقاً — فقط شعار الموقع ورسالة ترحيب وزر الدخول" },
   ];
+
+  const handleSave = () => {
+    onSave({
+      guestScreen: screen,
+      guestWelcomeText: welcomeText,
+      guestListsConfig: { showSections, sectionsTitle, sectionTitles, showLocations, locationsTitle, locationTitles, showInventoryTable },
+    });
+    onClose();
+  };
 
   return (
     <Modal title="إعدادات شاشة البداية" onClose={onClose}>
@@ -5085,9 +5322,93 @@ function GuestScreenSettingsModal({ data, onSave, onClose }) {
             />
           </Field>
         )}
+        {screen === "lists" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {/* -------- قائمة الأقسام -------- */}
+            <div style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={showSections} onChange={(e) => setShowSections(e.target.checked)} />
+                <span style={{ fontWeight: 700, fontSize: 13.5 }}>إظهار قائمة الأقسام</span>
+              </label>
+              {showSections && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <Field label="عنوان القائمة">
+                    <input className="input" value={sectionsTitle} onChange={(e) => setSectionsTitle(e.target.value)} placeholder="قائمة الأقسام" />
+                  </Field>
+                  {branches.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>عنوان مخصص لكل قسم (اختياري — يترك فارغاً لاستخدام اسم القسم الأصلي):</div>
+                      {branches.map((b) => (
+                        <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 12.5, minWidth: 110, color: "var(--ink-soft)" }}>{b.name}</span>
+                          <input
+                            className="input" style={{ flex: 1 }}
+                            value={sectionTitles[b.id] || ""}
+                            onChange={(e) => setSectionTitles((s) => ({ ...s, [b.id]: e.target.value }))}
+                            placeholder={b.name}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* -------- قائمة المواقع -------- */}
+            <div style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={showLocations} onChange={(e) => setShowLocations(e.target.checked)} />
+                <span style={{ fontWeight: 700, fontSize: 13.5 }}>إظهار قائمة المواقع</span>
+              </label>
+              {showLocations && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <Field label="عنوان القائمة">
+                    <input className="input" value={locationsTitle} onChange={(e) => setLocationsTitle(e.target.value)} placeholder="قائمة المواقع" />
+                  </Field>
+                  {locationGroups.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>عنوان مخصص لكل موقع (اختياري — يترك فارغاً لاستخدام اسم الموقع الأصلي):</div>
+                      {locationGroups.map((g) => (
+                        <div key={g.branchId || "none"} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-soft)" }}>{g.branchLabel}</div>
+                          {g.locations.map((loc) => {
+                            const key = `${g.branchId}::${loc}`;
+                            return (
+                              <div key={key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <span style={{ fontSize: 12.5, minWidth: 110, color: "var(--ink-soft)" }}>{loc}</span>
+                                <input
+                                  className="input" style={{ flex: 1 }}
+                                  value={locationTitles[key] || ""}
+                                  onChange={(e) => setLocationTitles((s) => ({ ...s, [key]: e.target.value }))}
+                                  placeholder={loc}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* -------- إظهار/إخفاء جدول المخزون تحت القوائم -------- */}
+            <div style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={showInventoryTable} onChange={(e) => setShowInventoryTable(e.target.checked)} />
+                <span style={{ fontWeight: 700, fontSize: 13.5 }}>إظهار جدول المخزون الكامل تحت القوائم</span>
+              </label>
+              <div style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 6 }}>
+                {showInventoryTable
+                  ? "الزائر يشوف قوائم الأقسام/المواقع بالأعلى، وتحتها جدول المخزون كامل بأرصدته."
+                  : "الزائر يشوف فقط قوائم الأقسام/المواقع بدون أي بيانات أرصدة أو تفاصيل أصناف."}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="modal-actions">
           <button className="btn-ghost" onClick={onClose}>إلغاء</button>
-          <button className="btn-primary" onClick={() => { onSave({ guestScreen: screen, guestWelcomeText: welcomeText }); onClose(); }}>
+          <button className="btn-primary" onClick={handleSave}>
             <Check size={15} /> حفظ
           </button>
         </div>
@@ -5739,6 +6060,8 @@ function App() {
         <main className="view-main">
           {data.guestScreen === "welcome" ? (
             <GuestWelcomeScreen text={data.guestWelcomeText} />
+          ) : data.guestScreen === "lists" ? (
+            <GuestListsWithInventory data={data} inventory={inventory} triggerPrint={triggerPrint} />
           ) : data.guestScreen === "dashboard" ? (
             <GuestDashboardSummary inventory={inventory} />
           ) : (
@@ -5926,8 +6249,8 @@ function App() {
         <GuestScreenSettingsModal
           data={data}
           onClose={() => setShowGuestScreenSettings(false)}
-          onSave={({ guestScreen, guestWelcomeText }) => {
-            setData({ ...data, guestScreen, guestWelcomeText });
+          onSave={({ guestScreen, guestWelcomeText, guestListsConfig }) => {
+            setData({ ...data, guestScreen, guestWelcomeText, guestListsConfig });
             notify("تم حفظ إعدادات شاشة البداية");
           }}
         />
@@ -6354,6 +6677,12 @@ function FontStyles() {
       .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 20px; padding: 7px 14px; font-size: 12px; font-family: 'Tajawal'; font-weight: 500; cursor: pointer; color: var(--ink-soft); }
       .chip-active { background: var(--navy); border-color: var(--navy); color: #F3EEDD; }
+      /* عناصر قوائم "الأقسام/المواقع" بشاشة البداية للزوّار — شكل شبه مستطيل
+         (زوايا أقل استدارة) بدل الشكل البيضاوي الكامل المستخدم بباقي الشيبس */
+      .list-chip { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 8px 14px; font-size: 12.5px; font-family: 'Tajawal'; font-weight: 600; cursor: pointer; color: var(--ink); display: inline-flex; align-items: center; gap: 6px; transition: background .15s, border-color .15s, color .15s; }
+      .list-chip:hover { border-color: var(--navy); }
+      .list-chip-active { background: var(--navy); border-color: var(--navy); color: #F3EEDD; }
+      .list-chip-active .cat-count { color: #F3EEDD; opacity: .85; }
 
       /* ---------- التسجيل السريع (دخول/خروج مباشرة من قائمة الأغراض) ---------- */
       .quick-chip-in.chip-active { background: var(--green); border-color: var(--green); color: #fff; }
