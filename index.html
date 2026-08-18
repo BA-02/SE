@@ -131,7 +131,7 @@ import {
   ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert,
   Users, KeyRound, Layers, Shuffle, Eye, EyeOff, Bell, RotateCcw, Sun, Moon, Monitor, ClipboardList,
   BarChart3, PieChart, Percent, TrendingUp, ListChecks, Briefcase, Undo2, Tags,
-  Upload, FolderOpen, HardDriveDownload
+  Upload, FolderOpen, HardDriveDownload, Smartphone, RefreshCw, Copy, Wifi, WifiOff
 } from "lucide-react";
 import JsBarcode from "https://esm.sh/jsbarcode@3.11.6";
 
@@ -5737,6 +5737,432 @@ function ReportsPage({ data, inventory, auditLog }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  ماسح الباركود اللاسلكي عبر الجوال (Session Pairing عبر Firestore) */
+/*  ------------------------------------------------------------------ */
+/*  فكرة الربط: اللابتوب يولّد رمز جلسة من 4 أرقام ويكتب وثيقة مؤقتة   */
+/*  في نفس مخزن Firestore الموجود أصلاً (window.storage) تحت مفتاح     */
+/*  "scanner_session_<code>". الجوال (صفحة index.html?scanner=1)      */
+/*  يقرأ نفس الوثيقة بعد إدخال الرمز، ثم يكتب كل باركود يمسحه بداخلها. */
+/*  اللابتوب يستمع لنفس الوثيقة لحظياً (window.subscribeStorage) ويوصّل */
+/*  الرقم تلقائياً — دون أي تعديل على نماذج/حقول الباركود القائمة.     */
+/* ------------------------------------------------------------------ */
+
+const SCANNER_SESSION_PREFIX = "scanner_session_";
+const SCANNER_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // ساعتان — بعدها يُعتبر الرمز منتهي الصلاحية
+
+function genScannerCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function scannerSessionKey(code) {
+  return SCANNER_SESSION_PREFIX + String(code || "").trim();
+}
+
+function scannerMobileUrl(code) {
+  try {
+    const url = new URL(window.location.href);
+    url.hash = "";
+    url.search = "";
+    url.searchParams.set("scanner", "1");
+    url.searchParams.set("code", code);
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+/* إيصال الباركود القادم من الجوال إلى حقل الباركود المفتوح حالياً على
+   اللابتوب — بنفس أسلوب أي قارئ باركود USB/بلوتوث فعلي متصل بالجهاز
+   (محاكاة ضغطات لوحة مفاتيح حقيقية)، حتى يعمل تلقائياً مع أي حقل باركود
+   موجود بالموقع (البحث، نموذج إضافة صنف، نموذج وارد/صادر، صفحة
+   الباركودات...) دون أي تعديل على تلك النماذج نفسها.
+   - لو فيه حقل نص مُركَّز عليه حالياً: نكتب القيمة بداخله فعلياً (عبر
+     الـ setter الأصلي لعنصر input حتى يلتقطها React) ثم نرسل Enter.
+   - لو ما فيه أي حقل مُركَّز عليه: نرسل ضغطات مفاتيح منفصلة على الصفحة
+     تحاكي قارئ USB/بلوتوث فعلي — وهذا بالضبط ما تلتقطه صفحة الوارد/الصادر
+     من قبل (دعم قارئ الباركود اليدوي العام بالصفحة). */
+function deliverScannedBarcode(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) return;
+
+  const active = document.activeElement;
+  const isEditableField =
+    active &&
+    (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
+    !active.disabled && !active.readOnly &&
+    document.body.contains(active);
+
+  if (isEditableField) {
+    const proto = active.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) {
+      setter.call(active, value);
+      active.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    active.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    active.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+  } else if (!document.querySelector(".modal-overlay")) {
+    for (const ch of value) {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
+    }
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+  }
+
+  playBeep("success");
+  hapticPulse("success");
+}
+
+function ScannerPairing({ isOwner }) {
+  const [open, setOpen] = useState(false);
+  const [session, setSession] = useState(null); // { code, status, lastBarcode, scanId, createdAt }
+  const [copied, setCopied] = useState(false);
+  const unsubRef = React.useRef(null);
+  const lastScanIdRef = React.useRef(0);
+
+  const stopListening = () => {
+    if (unsubRef.current) { try { unsubRef.current(); } catch {} unsubRef.current = null; }
+  };
+
+  const listen = (code) => {
+    stopListening();
+    lastScanIdRef.current = 0;
+    unsubRef.current = window.subscribeStorage
+      ? window.subscribeStorage(scannerSessionKey(code), (rawValue) => {
+          let parsed;
+          try { parsed = JSON.parse(rawValue); } catch { return; }
+          if (!parsed) return;
+          setSession((s) => (s ? { ...s, ...parsed } : parsed));
+          if (parsed.scanId && parsed.scanId > lastScanIdRef.current && parsed.lastBarcode) {
+            lastScanIdRef.current = parsed.scanId;
+            deliverScannedBarcode(parsed.lastBarcode);
+          }
+        })
+      : null;
+  };
+
+  const startSession = async () => {
+    const code = genScannerCode();
+    const value = { code, createdAt: Date.now(), status: "waiting", lastBarcode: null, scanId: 0, phoneConnectedAt: null };
+    setSession(value);
+    try { await window.storage?.set(scannerSessionKey(code), JSON.stringify(value)); } catch {}
+    listen(code);
+  };
+
+  const endSession = async (silentCode) => {
+    stopListening();
+    const code = silentCode || session?.code;
+    if (code) { try { await window.storage?.delete(scannerSessionKey(code)); } catch {} }
+    setSession(null);
+  };
+
+  const regenerate = async () => {
+    const oldCode = session?.code;
+    stopListening();
+    if (oldCode) { try { await window.storage?.delete(scannerSessionKey(oldCode)); } catch {} }
+    setSession(null);
+    await startSession();
+  };
+
+  useEffect(() => {
+    if (open && !session) startSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => () => stopListening(), []);
+
+  if (!isOwner) return null;
+
+  const connected = session?.status === "connected";
+  const link = session?.code ? scannerMobileUrl(session.code) : "";
+
+  const copyLink = async () => {
+    if (!link) return;
+    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
+  };
+
+  return (
+    <>
+      <button className="icon-btn" title="ربط ماسح الجوال" onClick={() => setOpen(true)}>
+        <Smartphone size={17} />
+      </button>
+      {open && (
+        <Modal
+          title={<><Smartphone size={16} style={{ verticalAlign: "-2px", marginLeft: 6 }} /> ربط ماسح الجوال</>}
+          onClose={() => setOpen(false)}
+        >
+          <div className="scanner-pair-body">
+            <div className={`scanner-status ${connected ? "scanner-status-on" : "scanner-status-wait"}`}>
+              {connected ? <><Wifi size={14} /> متصل بالماسح 🟢</> : <><WifiOff size={14} /> جاري الانتظار…</>}
+            </div>
+
+            <div className="scanner-code-display">{session?.code ? session.code.split("").join(" ") : "‑ ‑ ‑ ‑"}</div>
+            <p className="scanner-hint">افتح كاميرا الجوال على رابط المسح وادخل هذا الرمز، أو افتح الرابط بالأسفل مباشرة من الجوال</p>
+
+            <div className="scanner-link-row">
+              <input className="input scanner-link-input mono" readOnly value={link} onFocus={(e) => e.target.select()} />
+              <button type="button" className="icon-btn" title="نسخ الرابط" onClick={copyLink}>
+                {copied ? <Check size={16} /> : <Copy size={16} />}
+              </button>
+            </div>
+
+            {connected && session?.lastBarcode && (
+              <div className="scanner-last-scan">
+                <ScanLine size={13} /> آخر باركود مستلم: <strong>{session.lastBarcode}</strong>
+              </div>
+            )}
+
+            <div className="scanner-actions">
+              <button type="button" className="btn-ghost" onClick={regenerate}><RefreshCw size={14} /> رمز جديد</button>
+              <button type="button" className="btn-danger" onClick={() => { endSession(); setOpen(false); }}><X size={14} /> إنهاء الجلسة</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  صفحة الجوال المستقلة: تفتح عبر رابط index.html?scanner=1          */
+/* ------------------------------------------------------------------ */
+function ScannerMobilePage({ initialCode }) {
+  const [step, setStep] = useState("code"); // code | connecting | scanning | error
+  const [code, setCode] = useState(initialCode || "");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [lastSent, setLastSent] = useState(null);
+  const [manualCode, setManualCode] = useState("");
+  const scannerRef = React.useRef(null);
+  const busyRef = React.useRef(false);
+  const scanCounterRef = React.useRef(0);
+  const lastValueRef = React.useRef("");
+  const lastTimeRef = React.useRef(0);
+  const regionId = "scanner-mobile-region";
+
+  const loadHtml5Qrcode = () =>
+    new Promise((resolve, reject) => {
+      if (window.Html5Qrcode) return resolve();
+      const existing = document.querySelector('script[data-html5-qrcode]');
+      if (existing) {
+        existing.addEventListener("load", () => resolve());
+        existing.addEventListener("error", () => reject(new Error("load-failed")));
+        return;
+      }
+      const s = document.createElement("script");
+      s.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
+      s.async = true;
+      s.setAttribute("data-html5-qrcode", "1");
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("load-failed"));
+      document.head.appendChild(s);
+    });
+
+  const stopCamera = async () => {
+    const inst = scannerRef.current;
+    scannerRef.current = null;
+    if (!inst) return;
+    try { await inst.stop(); } catch {}
+    try { await inst.clear(); } catch {}
+  };
+
+  const sendBarcode = async (value) => {
+    const clean = String(value || "").trim();
+    if (!clean) return;
+    const now = Date.now();
+    if (clean === lastValueRef.current && now - lastTimeRef.current < 1500) return; // منع تكرار نفس الكود بسرعة
+    lastValueRef.current = clean;
+    lastTimeRef.current = now;
+    scanCounterRef.current += 1;
+
+    try {
+      await window.storage?.set(
+        scannerSessionKey(code),
+        JSON.stringify({
+          code,
+          status: "connected",
+          lastBarcode: clean,
+          scanId: scanCounterRef.current,
+          lastScanAt: now,
+        })
+      );
+      setLastSent(clean);
+      hapticPulse("success");
+      playBeep("success");
+    } catch {
+      hapticPulse("error");
+    }
+  };
+
+  const startCamera = async () => {
+    try {
+      await loadHtml5Qrcode();
+    } catch {
+      setStep("camera-error");
+      return;
+    }
+    try {
+      const html5QrCode = new window.Html5Qrcode(regionId);
+      scannerRef.current = html5QrCode;
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 260, height: 170 } },
+        (decodedText) => { sendBarcode(decodedText); },
+        () => {} // نتجاهل أخطاء عدم اكتشاف باركود بكل إطار — طبيعية جداً
+      );
+    } catch {
+      setStep("camera-error");
+    }
+  };
+
+  const connect = async (rawCode) => {
+    const clean = String(rawCode || "").trim();
+    if (clean.length !== 4) { setErrorMsg("أدخل رمزاً من 4 أرقام"); return; }
+    setErrorMsg("");
+    setStep("connecting");
+    try {
+      const res = await window.storage?.get(scannerSessionKey(clean));
+      const parsed = res?.value ? JSON.parse(res.value) : null;
+      if (!parsed || Date.now() - (parsed.createdAt || 0) > SCANNER_SESSION_TTL_MS) {
+        setStep("code");
+        setErrorMsg("الرمز غير صحيح أو انتهت صلاحية الجلسة — تأكد من الرمز الظاهر على اللابتوب");
+        return;
+      }
+      setCode(clean);
+      await window.storage?.set(
+        scannerSessionKey(clean),
+        JSON.stringify({ ...parsed, status: "connected", phoneConnectedAt: Date.now() })
+      );
+      setStep("scanning");
+    } catch {
+      setStep("code");
+      setErrorMsg("تعذّر الاتصال — تأكد من اتصال الجوال بالإنترنت وحاول مجدداً");
+    }
+  };
+
+  useEffect(() => {
+    if (step === "scanning") startCamera();
+    return () => { if (step !== "scanning") stopCamera(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  useEffect(() => () => stopCamera(), []);
+
+  useEffect(() => {
+    if (initialCode && initialCode.length === 4) connect(initialCode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const disconnect = async () => {
+    await stopCamera();
+    setStep("code");
+    setLastSent(null);
+  };
+
+  const submitManual = () => {
+    const v = manualCode.trim();
+    if (v) { sendBarcode(v); setManualCode(""); }
+  };
+
+  return (
+    <div className="scanner-mobile-shell">
+      <FontStyles />
+      <style>{`
+        .scanner-mobile-shell {
+          min-height: 100vh; min-height: 100dvh; background: var(--navy); color: #F3EEDD;
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          padding: 24px 18px; font-family: 'Tajawal', sans-serif; direction: rtl; text-align: center;
+          gap: 16px; box-sizing: border-box;
+        }
+        .scanner-mobile-title { font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 20px; display: flex; align-items: center; gap: 8px; }
+        .scanner-mobile-card { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 14px; align-items: center; }
+        .scanner-mobile-code-input {
+          width: 100%; text-align: center; letter-spacing: 10px; font-size: 30px; font-family: 'JetBrains Mono', monospace;
+          padding: 14px; border-radius: 12px; border: 2px solid #46586A; background: #1E2A33; color: #F3EEDD; box-sizing: border-box;
+        }
+        .scanner-mobile-code-input:focus { outline: none; border-color: #C9BA96; }
+        .scanner-mobile-btn {
+          width: 100%; padding: 14px; border-radius: 12px; border: none; background: #C9BA96; color: #23303A;
+          font-weight: 800; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .scanner-mobile-btn:active { transform: scale(0.98); }
+        .scanner-mobile-error { color: #F3A79A; font-size: 13.5px; }
+        .scanner-mobile-hint { font-size: 13px; color: #B7C2CB; }
+        .scanner-mobile-video-wrap { width: 100%; max-width: 340px; border-radius: 16px; overflow: hidden; position: relative; background: #000; aspect-ratio: 1/1; }
+        #${regionId} { width: 100%; height: 100%; }
+        #${regionId} video { width: 100% !important; height: 100% !important; object-fit: cover; }
+        .scanner-mobile-status { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; }
+        .scanner-mobile-last { background: rgba(255,255,255,0.08); border-radius: 10px; padding: 10px 14px; font-family: 'JetBrains Mono', monospace; font-size: 15px; direction: ltr; }
+        .scanner-mobile-manual { display: flex; gap: 8px; width: 100%; max-width: 340px; }
+        .scanner-mobile-manual input {
+          flex: 1; padding: 12px; border-radius: 10px; border: 1px solid #46586A; background: #1E2A33; color: #F3EEDD; font-size: 16px;
+        }
+        .scanner-mobile-disconnect { background: transparent; border: 1px solid #6B7A87; color: #F3EEDD; padding: 10px 16px; border-radius: 10px; font-size: 13.5px; cursor: pointer; }
+      `}</style>
+
+      <div className="scanner-mobile-title"><Smartphone size={20} /> قارئ باركود لاسلكي</div>
+
+      {step === "code" && (
+        <div className="scanner-mobile-card">
+          <p className="scanner-mobile-hint">أدخل الرمز المكوّن من 4 أرقام الظاهر على شاشة اللابتوب</p>
+          <input
+            className="scanner-mobile-code-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={4}
+            autoFocus
+            placeholder="0000"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            onKeyDown={(e) => { if (e.key === "Enter") connect(code); }}
+          />
+          {errorMsg && <div className="scanner-mobile-error"><TriangleAlert size={13} style={{ verticalAlign: "-2px" }} /> {errorMsg}</div>}
+          <button className="scanner-mobile-btn" onClick={() => connect(code)}><Wifi size={17} /> ربط بالجهاز</button>
+        </div>
+      )}
+
+      {step === "connecting" && (
+        <div className="scanner-mobile-card">
+          <p className="scanner-mobile-hint">جاري الاتصال…</p>
+        </div>
+      )}
+
+      {(step === "scanning" || step === "camera-error") && (
+        <div className="scanner-mobile-card">
+          <div className="scanner-mobile-status"><Wifi size={15} /> متصل بالكمبيوتر 🟢</div>
+
+          {step === "scanning" && (
+            <div className="scanner-mobile-video-wrap">
+              <div id={regionId} />
+            </div>
+          )}
+
+          {step === "camera-error" && (
+            <div className="scanner-mobile-error">
+              <TriangleAlert size={13} style={{ verticalAlign: "-2px" }} /> تعذّر تشغيل الكاميرا. تأكد من إعطاء إذن الكاميرا للمتصفح، أو استخدم الإدخال اليدوي بالأسفل.
+            </div>
+          )}
+
+          {lastSent && (
+            <div className="scanner-mobile-last"><ScanLine size={13} style={{ verticalAlign: "-2px" }} /> تم الإرسال: {lastSent}</div>
+          )}
+
+          <div className="scanner-mobile-manual">
+            <input
+              placeholder="أدخل الكود يدوياً عند تعذّر الكاميرا"
+              value={manualCode}
+              onChange={(e) => setManualCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submitManual(); }}
+            />
+            <button className="icon-btn" style={{ color: "#F3EEDD" }} onClick={submitManual}><Check size={18} /></button>
+          </div>
+
+          <button className="scanner-mobile-disconnect" onClick={disconnect}>قطع الاتصال / رمز جديد</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [page, setPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
@@ -6198,6 +6624,7 @@ function App() {
               <HardDriveDownload size={17} />
             </button>
           )}
+          <ScannerPairing isOwner={isOwner} />
           <button className="topbar-logout-btn" onClick={logout} title="تسجيل الخروج">
             <X size={15} /> <span>تسجيل الخروج</span>
           </button>
@@ -7051,6 +7478,22 @@ function FontStyles() {
          إضافة الصنف */
       .barcode-match-hint { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--olive); margin-top: 6px; }
 
+      /* ---------- ربط ماسح الجوال (Scanner Pairing) ---------- */
+      .scanner-pair-body { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 4px 2px 8px; }
+      .scanner-status { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 700; padding: 6px 12px; border-radius: 999px; }
+      .scanner-status-wait { background: var(--amber-bg); color: var(--amber); }
+      .scanner-status-on { background: var(--green-bg); color: var(--green); }
+      .scanner-code-display {
+        font-family: 'JetBrains Mono', monospace; font-size: 34px; font-weight: 700; letter-spacing: 6px;
+        background: var(--chip-bg); border: 1px dashed var(--line); border-radius: 12px; padding: 10px 20px; color: var(--ink);
+      }
+      .scanner-hint { font-size: 12.5px; color: var(--ink-soft); margin: 0; max-width: 320px; }
+      .scanner-link-row { display: flex; gap: 6px; width: 100%; }
+      .scanner-link-input { flex: 1; font-size: 12px; direction: ltr; text-align: left; }
+      .scanner-last-scan { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-soft); }
+      .scanner-actions { display: flex; gap: 8px; width: 100%; margin-top: 4px; }
+      .scanner-actions button { flex: 1; }
+
       /* ---------- الأنشطة المؤقتة ---------- */
       .activity-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
       .activity-card { padding: 0; overflow: hidden; }
@@ -7148,8 +7591,16 @@ function FontStyles() {
   );
 }
 
+function RootRouter() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("scanner") === "1") {
+    return <ScannerMobilePage initialCode={params.get("code") || ""} />;
+  }
+  return <App />;
+}
+
 const root = createRoot(document.getElementById("root"));
-root.render(<App />);
+root.render(<RootRouter />);
 </script>
 </body>
 </html>
