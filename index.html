@@ -3533,15 +3533,21 @@ const NAV = [
   { key: "branches", label: "الأقسام", icon: MapPin, ownerOnly: true },
 ];
 
+// صلاحيات إضافية ليست صفحات بحد ذاتها (لا تظهر بالقائمة الجانبية) لكن تُمنح
+// وتُمنع بنفس طريقة صفحات NAV — مثل ربط الجوال كقارئ باركود لاسلكي.
+const EXTRA_PERMISSIONS = [
+  { key: "scannerPairing", label: "ربط الجوال (قارئ باركود لاسلكي)", icon: Smartphone },
+];
+
 // الصفحات التي يقدر رئيس الموقع يتيحها أو يمنعها لكل مستخدم (متحكم) على حدة.
 // لوحة التحكم دائماً متاحة للجميع كصفحة أساسية، وباقي صفحات الإدارة
 // (الرؤساء/المستخدمون/المجموعات/الأقسام) تبقى حصراً على رئيس الموقع دائماً.
-const GRANTABLE_PAGES = NAV.filter((n) => !n.ownerOnly && n.key !== "dashboard");
+const GRANTABLE_PAGES = [...NAV.filter((n) => !n.ownerOnly && n.key !== "dashboard"), ...EXTRA_PERMISSIONS];
 
 // الصفحات التي يقدر الرئيس صاحب التحكم الكامل يتيحها أو يمنعها لرئيس آخر
 // "بصلاحيات محددة" — تشمل كل الصفحات (حتى صفحات الإدارة) عدا لوحة التحكم
 // التي تبقى متاحة للجميع دائماً.
-const OWNER_GRANTABLE_PAGES = NAV.filter((n) => n.key !== "dashboard");
+const OWNER_GRANTABLE_PAGES = [...NAV.filter((n) => n.key !== "dashboard"), ...EXTRA_PERMISSIONS];
 
 /* ------------------------------------------------------------------ */
 /*  OWNERS PAGE (إدارة رؤساء الموقع — كل رئيس باسم إجباري وكلمة مرور خاصة) */
@@ -6520,6 +6526,11 @@ function App() {
   // افتراضياً حتى لا ينكسر شيء بالترقية.
   const readOnly = currentUser ? !currentUser.canEdit : false;
   const isRestrictedOwner = isOwner && Array.isArray(currentOwner?.permissions);
+  // نفس منطق صلاحيات الصفحات يُطبّق على صلاحية "ربط الجوال" — رئيس بتحكم كامل
+  // أو مستخدم قديم بدون صلاحيات محددة يشوفها دائماً كسابق.
+  const canUseScanner = isOwner
+    ? (!isRestrictedOwner || currentOwner.permissions.includes("scannerPairing"))
+    : (!currentUser?.permissions || currentUser.permissions.includes("scannerPairing"));
   const nonOwnerKeys = NAV.filter((n) => !n.ownerOnly).map((n) => n.key);
   const allowedKeys = isOwner
     ? (isRestrictedOwner
@@ -6624,7 +6635,7 @@ function App() {
               <HardDriveDownload size={17} />
             </button>
           )}
-          <ScannerPairing isOwner={isOwner} />
+          {canUseScanner && <ScannerPairing isOwner={isOwner} />}
           <button className="topbar-logout-btn" onClick={logout} title="تسجيل الخروج">
             <X size={15} /> <span>تسجيل الخروج</span>
           </button>
