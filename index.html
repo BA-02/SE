@@ -3926,7 +3926,7 @@ function UserForm({ user, branches, onCancel, onSave }) {
   return (
     <div className="form-grid">
       <Field label="الاسم الحقيقي (يظهر في سجل النشاط)">
-        <input className="input" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: محمد العتيبي" />
+        <input className="input" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: محمد" />
       </Field>
       <Field label="اسم المستخدم">
         <input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="مثال: mohammed" />
