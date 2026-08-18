@@ -2386,6 +2386,13 @@ function AddOrMoveItemModal({ kind, data, setData, notify, inventory, onClose })
     [data.items, form.code]
   );
 
+  // كود مسجّل بقائمة الباركودات (صفحة "الباركودات") لكن ما له صنف فعلي
+  // بالمخزون بعد — نستخدمه لتعبئة اسم المنتج تلقائياً بدل ما يكتبه المستخدم
+  const matchedBarcode = React.useMemo(
+    () => !matchedItem && (data.barcodes || []).find((b) => b.number === form.code.trim()),
+    [data.barcodes, form.code, matchedItem]
+  );
+
   const balance = React.useMemo(() => {
     if (!matchedItem) return null;
     return inventory?.find((i) => i.code === matchedItem.code)?.balance ?? 0;
@@ -2402,7 +2409,9 @@ function AddOrMoveItemModal({ kind, data, setData, notify, inventory, onClose })
       }));
       setTimeout(() => qtyRef.current?.focus(), 0);
     } else {
-      setForm((f) => ({ ...f, code, name: "" }));
+      // صنف جديد كلياً — لو كوده مسجّل مسبقاً بقائمة الباركودات نعبّي اسمه منها تلقائياً
+      const b = (data.barcodes || []).find((x) => x.number === code);
+      setForm((f) => ({ ...f, code, name: b ? b.name : "" }));
     }
     setCodeTouched(true);
   };
@@ -2499,6 +2508,11 @@ function AddOrMoveItemModal({ kind, data, setData, notify, inventory, onClose })
             />
             <ScanCameraButton onClick={() => setCameraOpen(true)} />
           </div>
+          {matchedBarcode && (
+            <div className="barcode-match-hint">
+              <Barcode size={12} /> تم التعرف عليه من قائمة الباركودات: «{matchedBarcode.name}»
+            </div>
+          )}
         </Field>
 
         {isOut && codeTouched && form.code.trim() && !matchedItem && (
@@ -5699,6 +5713,7 @@ function App() {
      مع زر واحد للانتقال لوضع التحكم والتعديل (محمي بكلمة مرور). */
   if (isGuest) {
     return (
+      <>
       <div className="view-shell">
         <FontStyles />
         <header className="view-topbar">
@@ -5740,8 +5755,9 @@ function App() {
         )}
 
         <Toast toast={toast} />
-        <PrintableReport job={printJob} data={data} inventory={inventory} />
       </div>
+      <PrintableReport job={printJob} data={data} inventory={inventory} />
+      </>
     );
   }
 
@@ -5789,6 +5805,7 @@ function App() {
     : `${currentUser?.name || currentUser?.username}${readOnly ? " (قراءة فقط)" : " (يقدر يعدّل)"}`;
 
   return (
+    <>
     <div className={`app-shell ${isMobile ? "is-mobile" : ""}`}>
       <FontStyles />
       {navOpen && <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />}
@@ -5946,8 +5963,9 @@ function App() {
       )}
 
       <Toast toast={toast} />
-      <PrintableReport job={printJob} data={data} inventory={inventory} />
     </div>
+    <PrintableReport job={printJob} data={data} inventory={inventory} />
+    </>
   );
 }
 
