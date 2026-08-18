@@ -206,7 +206,7 @@ const seedBarcodes = [
   { name: "صواني الحديد", number: "9987527455" },
 ];
 
-const LOW_STOCK_THRESHOLD = 10;
+const LOW_STOCK_THRESHOLD = 0;
 
 /* ------------------------------------------------------------------ */
 /*  USERS (بسيط: اسم مستخدم + كلمة مرور + هل يقدر يعدّل)              */
@@ -1506,7 +1506,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
     .filter((it) => fuzzyIncludes(it.name + it.code + it.category, query))
     .filter((it) => branchFilter === "all" || it.branch === branchFilter);
 
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "", initialQty: "0" } });
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "", initialQty: "1" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -1519,9 +1519,9 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
       notify("هذا الكود مسجّل مسبقاً لصنف آخر", "error");
       return;
     }
-    // حقل الكمية الابتدائية موجود فقط بنموذج الإضافة، وليس جزءاً من شكل
-    // بيانات الصنف نفسه (الرصيد يُحسب دائماً من حركات الداخل/الخارج)،
-    // فنفصله هنا ونحوّله لحركة "داخل" واحدة عند الحفظ إن كانت قيمته أكبر من صفر
+    // حقل الكمية موجود بنموذج الإضافة والتعديل، وليس جزءاً من شكل بيانات
+    // الصنف نفسه (الرصيد يُحسب دائماً من حركات الداخل/الخارج)، فنفصله هنا
+    // ونحوّله لحركة "داخل" أو "خارج" عند الحفظ حسب الفرق عن الرصيد الحالي
     const { initialQty, ...cleanItem } = item;
     let items;
     if (modal.mode === "add") {
@@ -1530,21 +1530,36 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
       items = data.items.map((i) => (i.code === modal.item.code ? cleanItem : i));
     }
     const qty = Number(initialQty);
-    const nextIncoming =
-      modal.mode === "add" && qty > 0
-        ? [
-            {
-              id: genId("in"),
-              code: cleanItem.code,
-              name: cleanItem.name,
-              date: todayISO(),
-              qty,
-              notes: "رصيد ابتدائي عند إضافة الصنف",
-            },
-            ...data.incoming,
-          ]
-        : data.incoming;
-    setData({ ...data, items, incoming: nextIncoming });
+    let nextIncoming = data.incoming;
+    let nextOutgoing = data.outgoing;
+    if (modal.mode === "add" && qty > 0) {
+      nextIncoming = [
+        {
+          id: genId("in"),
+          code: cleanItem.code,
+          name: cleanItem.name,
+          date: todayISO(),
+          qty,
+          notes: "رصيد ابتدائي عند إضافة الصنف",
+        },
+        ...data.incoming,
+      ];
+    } else if (modal.mode === "edit" && initialQty !== "" && initialQty !== undefined) {
+      const currentBalance = inventory?.find((i) => i.code === modal.item.code)?.balance ?? 0;
+      const diff = qty - currentBalance;
+      if (diff > 0) {
+        nextIncoming = [
+          { id: genId("in"), code: cleanItem.code, name: cleanItem.name, date: todayISO(), qty: diff, notes: "تعديل يدوي للكمية عند تحديث الصنف" },
+          ...data.incoming,
+        ];
+      } else if (diff < 0) {
+        nextOutgoing = [
+          { id: genId("out"), code: cleanItem.code, name: cleanItem.name, date: todayISO(), qty: -diff, notes: "تعديل يدوي للكمية عند تحديث الصنف", returnType: "consume", returned: false },
+          ...data.outgoing,
+        ];
+      }
+    }
+    setData({ ...data, items, incoming: nextIncoming, outgoing: nextOutgoing });
     setModal(null);
     notify(modal.mode === "add" ? "تمت إضافة الصنف" : "تم حفظ التعديلات");
     if (modal.mode === "add" && systemNotify) {
@@ -1722,7 +1737,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                                 <Minus size={13} />
                               </button>
                               <input
-                                type="number" min="0" step="1" className="input mono quick-log-qty"
+                                type="number" lang="en" min="0" step="1" className="input mono quick-log-qty"
                                 placeholder="الكمية"
                                 value={qtyDrafts[it.code] || ""}
                                 onChange={(e) => setQtyDrafts((d) => ({ ...d, [it.code]: e.target.value }))}
@@ -1756,7 +1771,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
-          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} barcodes={data.barcodes} mode={modal.mode} onCancel={() => setModal(null)} onSave={save} />
+          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} barcodes={data.barcodes} mode={modal.mode} currentBalance={balanceFor(modal.item.code)} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -1862,8 +1877,12 @@ function EmojiPicker({ value, onChange }) {
   );
 }
 
-function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, onCancel, onSave }) {
-  const [form, setForm] = useState({ isContainer: false, parentCode: "", initialQty: "0", ...item });
+function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, currentBalance, onCancel, onSave }) {
+  const [form, setForm] = useState({
+    isContainer: false, parentCode: "",
+    initialQty: mode === "edit" ? String(currentBalance ?? 0) : "1",
+    ...item,
+  });
   // الأصناف المؤهلة تكون "صندوق" يوضع بداخله هذا الصنف: أي صنف عليه علامة isContainer
   // باستثناء الصنف نفسه (لا يقدر يكون بداخل نفسه) وأي صندوق أصلاً بداخل هذا الصنف (يمنع الحلقات)
   const containerOptions = (allItems || []).filter(
@@ -2001,25 +2020,26 @@ function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, onCanc
       <Field label="ملاحظات">
         <input className="input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="اختياري" />
       </Field>
-      {mode === "add" && (
-        <Field label="الكمية الابتدائية (اختياري)">
-          <input
-            type="number" min="0" step="0.5" className="input mono"
-            value={form.initialQty ?? ""} onChange={(e) => setForm({ ...form, initialQty: e.target.value })}
-            placeholder="0"
-          />
-        </Field>
-      )}
+      <Field label={mode === "add" ? "الكمية الابتدائية (اختياري)" : "الكمية الحالية"}>
+        <input
+          type="number" lang="en" min="0" step="1" className="input mono"
+          value={form.initialQty ?? ""} onChange={(e) => setForm({ ...form, initialQty: e.target.value })}
+          placeholder="1"
+        />
+        {mode === "edit" && (
+          <div className="field-hint">تغيير الرقم هنا يسجّل حركة دخول/خروج تلقائية لتعديل الرصيد للقيمة الجديدة</div>
+        )}
+      </Field>
       <Field label={`حد التنبيه الأدنى (اختياري، افتراضي ${LOW_STOCK_THRESHOLD})`}>
         <input
-          type="number" min="0" step="0.5" className="input mono"
+          type="number" lang="en" min="0" step="0.5" className="input mono"
           value={form.minQty ?? ""} onChange={(e) => setForm({ ...form, minQty: e.target.value })}
           placeholder={String(LOW_STOCK_THRESHOLD)}
         />
       </Field>
       <Field label="تاريخ الصلاحية (اختياري)">
         <input
-          type="date" className="input mono"
+          type="date" lang="en" className="input mono"
           value={form.expiryDate ?? ""} onChange={(e) => setForm({ ...form, expiryDate: e.target.value })}
         />
       </Field>
@@ -2255,7 +2275,7 @@ function ActivitiesPage({ data, setData, notify, readOnly, inventory }) {
                             ))}
                           </select>
                           <input
-                            type="number" min="0" step="0.5" className="input mono" style={{ maxWidth: 100 }}
+                            type="number" lang="en" min="0" step="0.5" className="input mono" style={{ maxWidth: 100 }}
                             placeholder="الكمية"
                             value={addForm.qty}
                             onChange={(e) => setAddForm({ ...addForm, qty: e.target.value })}
@@ -2581,14 +2601,14 @@ function AddOrMoveItemModal({ kind, data, setData, notify, inventory, onClose })
               </Field>
               <Field label={`حد التنبيه الأدنى (اختياري، افتراضي ${LOW_STOCK_THRESHOLD})`}>
                 <input
-                  type="number" min="0" step="0.5" className="input mono"
+                  type="number" lang="en" min="0" step="0.5" className="input mono"
                   value={form.minQty ?? ""} onChange={(e) => setForm((f) => ({ ...f, minQty: e.target.value }))}
                   placeholder={String(LOW_STOCK_THRESHOLD)}
                 />
               </Field>
               <Field label="تاريخ الصلاحية (اختياري)">
                 <input
-                  type="date" className="input mono"
+                  type="date" lang="en" className="input mono"
                   value={form.expiryDate ?? ""} onChange={(e) => setForm((f) => ({ ...f, expiryDate: e.target.value }))}
                 />
               </Field>
@@ -2599,7 +2619,7 @@ function AddOrMoveItemModal({ kind, data, setData, notify, inventory, onClose })
         <Field label={isOut ? "الكمية المراد إخراجها" : "الكمية"}>
           <input
             ref={qtyRef}
-            type="number" min="0" step="0.5" className="input mono"
+            type="number" lang="en" min="0" step="0.5" className="input mono"
             value={form.qty}
             onChange={(e) => setForm((f) => ({ ...f, qty: e.target.value }))}
             placeholder="0"
@@ -2855,14 +2875,14 @@ function StockMovementPage({ kind, data, setData, notify, readOnly, inventory })
             </Field>
             <Field label="التاريخ">
               <input
-                type="date" className="input mono"
+                type="date" lang="en" className="input mono"
                 value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
               />
             </Field>
             <Field label="الكمية">
               <input
                 ref={qtyRef}
-                type="number" min="0" step="0.5" className="input mono"
+                type="number" lang="en" min="0" step="0.5" className="input mono"
                 value={form.qty}
                 onChange={(e) => setForm((f) => ({ ...f, qty: e.target.value }))}
                 onKeyDown={handleQtyKeyDown}
@@ -4287,7 +4307,7 @@ function TaskForm({ users, onCancel, onSave }) {
         </select>
       </Field>
       <Field label="موعد التسليم (اختياري)">
-        <input type="date" className="input mono" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        <input type="date" lang="en" className="input mono" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
       </Field>
       <div className="modal-actions">
         <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
