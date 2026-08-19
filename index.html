@@ -7239,6 +7239,20 @@ function FontStyles() {
       .app-shell.is-mobile .stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
       .app-shell.is-mobile .chart-grid { grid-template-columns: 1fr !important; }
       .app-shell.is-mobile .form-grid, .app-shell.is-mobile .form-grid-move { grid-template-columns: 1fr 1fr !important; }
+      /* على شاشات الجوال الضيقة (أغلب الهواتف) تُعرض حقول النماذج عمود
+         واحد بعرض كامل بدل التصاقها جنب بعض وانقطاع النص — يشمل هذا
+         نماذج الإضافة/التعديل كلها (باركود، صنف، مستخدم...الخ) */
+      @media (max-width: 560px) {
+        .app-shell.is-mobile .form-grid,
+        .app-shell.is-mobile .form-grid-move { grid-template-columns: 1fr !important; }
+        .app-shell.is-mobile .modal-overlay { align-items: flex-end !important; padding: 0 !important; }
+        .app-shell.is-mobile .modal-sheet { max-width: 100% !important; border-radius: 16px 16px 0 0 !important; max-height: 88vh !important; }
+        .app-shell.is-mobile .modal-body { padding: 16px !important; }
+        .app-shell.is-mobile .modal-actions { flex-direction: column-reverse !important; gap: 8px !important; }
+        .app-shell.is-mobile .modal-actions .btn-primary,
+        .app-shell.is-mobile .modal-actions .btn-ghost,
+        .app-shell.is-mobile .modal-actions .btn-danger { width: 100% !important; }
+      }
       .app-shell.is-mobile .topbar { padding: 10px 12px !important; gap: 8px !important; }
       .app-shell.is-mobile .global-search { max-width: none !important; padding: 7px 10px !important; }
       .app-shell.is-mobile .topbar-logout-btn span { display: none !important; }
@@ -8228,6 +8242,16 @@ function FontStyles() {
         .stat-grid { grid-template-columns: 1fr 1fr; }
         .form-grid, .form-grid-move { grid-template-columns: 1fr; }
         .page-title { font-size: 20px; }
+
+        /* نافذة الإضافة/التعديل على الجوال: تلتصق بأسفل الشاشة بعرض كامل
+           بدل الظهور كبطاقة صغيرة بمنتصف الشاشة — أسهل بالوصول وأريح
+           للمس، وأزرار الحفظ/الإلغاء تصير بعرض كامل وفوق بعض بدل
+           جنب بعض حتى ما تنضغط الأصابع الكبيرة بالخطأ */
+        .modal-overlay { align-items: flex-end; padding: 0; }
+        .modal-sheet { max-width: 100%; border-radius: 16px 16px 0 0; max-height: 88vh; }
+        .modal-body { padding: 16px; }
+        .modal-actions { flex-direction: column-reverse; gap: 8px; }
+        .modal-actions .btn-primary, .modal-actions .btn-ghost, .modal-actions .btn-danger { width: 100%; }
       }
     `}</style>
   );
