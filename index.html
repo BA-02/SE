@@ -239,10 +239,60 @@ const GROUP_EMOJI_HINTS = [
   { match: /سلامة|إطفاء/, emoji: "🧯" },
   { match: /أدوات|صيانة|عدة/, emoji: "🛠️" },
   { match: /قرطاسية|مكتب/, emoji: "📎" },
+  { match: /كتاب|كتب|مكتبة/, emoji: "📚" },
 ];
 function suggestEmojiForGroup(groupName) {
   const hit = GROUP_EMOJI_HINTS.find((h) => h.match.test(groupName || ""));
   return hit?.emoji || "";
+}
+
+// "طابع" بطاقة عرض الصنف — كل مجموعة تاخذ شكل بطاقة يحاكي مادتها الحقيقية
+// (بلاستيك يبين كأنه قنينة، كرتون يبين كأنه صندوق تعبئة...) بدل الشكل العادي
+// الموحّد. نتحقق أولاً من اسم مجموعة الصنف، وإن ما توافق أو ما فيه مجموعة
+// نتحقق من اسم/فئة الصنف نفسه — مجرد تمييز بصري، بدون أي تغيير بالبيانات
+const CARD_THEME_HINTS = [
+  { key: "book", match: /كتاب|كتب|مكتبة|رواية|مجلد|ديوان/ },
+  { key: "dishes", match: /صحون|مائدة|أطباق/ },
+  { key: "plastic", match: /بلاستيك/ },
+  { key: "paper", match: /ورق/ },
+  { key: "cleaning", match: /منظف|تنظيف/ },
+  { key: "water", match: /ماء|مياه/ },
+  { key: "cardboard", match: /كرتون/ },
+  { key: "electrical", match: /كهرب/ },
+  { key: "safety", match: /سلامة|إطفاء/ },
+  { key: "tools", match: /أدوات|صيانة|عدة/ },
+  { key: "stationery", match: /قرطاسية|مكتب/ },
+];
+function getCardTheme(item, itemGroups) {
+  if (!item) return null;
+  const group = (itemGroups || []).find((g) => g.id === item.group);
+  const groupName = group?.name || "";
+  for (const h of CARD_THEME_HINTS) {
+    if (h.match.test(groupName)) return h.key;
+  }
+  const selfText = `${item.name || ""} ${item.category || ""}`;
+  for (const h of CARD_THEME_HINTS) {
+    if (h.match.test(selfText)) return h.key;
+  }
+  return null;
+}
+// إبقاء الاسم القديم متاحاً تحسباً لاستخدامه في مكان آخر
+function isBookItem(item, itemGroups) {
+  return getCardTheme(item, itemGroups) === "book";
+}
+
+// تفضيل وضع العرض (بطاقات/جدول) — مشترك بين كل صفحات الموقع ومحفوظ محلياً
+// حتى يفضل نفس الاختيار لما ينتقل المستخدم بين الصفحات أو يرجع لاحقاً
+const VIEW_MODE_KEY = "warehouse-view-mode";
+function useSharedViewMode(defaultMode = "grid") {
+  const [view, setView] = useState(() => {
+    try { return localStorage.getItem(VIEW_MODE_KEY) || defaultMode; } catch { return defaultMode; }
+  });
+  const setAndPersist = (v) => {
+    setView(v);
+    try { localStorage.setItem(VIEW_MODE_KEY, v); } catch {}
+  };
+  return [view, setAndPersist];
 }
 
 function genId(prefix) {
@@ -1458,6 +1508,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   // قائمة الأغراض نفسها بضغطة وحدة، بدل ما يروح لصفحة منفصلة
   const [quickMode, setQuickMode] = useState("off"); // "off" | "in" | "out"
   const [qtyDrafts, setQtyDrafts] = useState({}); // { [code]: "3" }
+  const [view, setView] = useSharedViewMode("grid"); // بطاقات/جدول — مشترك مع صفحة المخزون
   const balanceFor = (code) => inventory?.find((i) => i.code === code)?.balance ?? 0;
 
   const logQuick = (item) => {
@@ -1505,6 +1556,74 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   const filtered = branchItems
     .filter((it) => fuzzyIncludes(it.name + it.code + it.category, query))
     .filter((it) => branchFilter === "all" || it.branch === branchFilter);
+
+  // تحديد جماعي (بمربعات اختيار) لتطبيق نفس كمية الدخول/الخروج على عدة
+  // أصناف دفعة وحدة — متاح فقط داخل وضع التسجيل السريع (دخول/خروج)
+  const [selectedCodes, setSelectedCodes] = useState(() => new Set());
+  const [bulkQty, setBulkQty] = useState("");
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const changeQuickMode = (mode) => {
+    setQuickMode((m) => (m === mode ? "off" : mode));
+    setSelectedCodes(new Set());
+    setBulkQty("");
+  };
+  const toggleSelect = (code) => setSelectedCodes((prev) => {
+    const next = new Set(prev);
+    if (next.has(code)) next.delete(code); else next.add(code);
+    return next;
+  });
+  const allSelected = filtered.length > 0 && filtered.every((it) => selectedCodes.has(it.code));
+  const toggleSelectAll = () => setSelectedCodes(allSelected ? new Set() : new Set(filtered.map((it) => it.code)));
+  const applyBulk = () => {
+    const qty = Number(bulkQty);
+    if (!bulkQty || !qty || qty <= 0) {
+      notify("أدخل كمية صحيحة أكبر من صفر", "error");
+      return;
+    }
+    const codes = Array.from(selectedCodes);
+    if (codes.length === 0) {
+      notify("حدد صنفاً واحداً على الأقل", "error");
+      return;
+    }
+    const isOut = quickMode === "out";
+    if (isOut) {
+      const short = codes.filter((code) => qty > balanceFor(code));
+      if (short.length > 0) {
+        notify(`الكمية غير كافية لـ ${short.length} من الأصناف المحددة`, "error");
+        return;
+      }
+    }
+    const now = Date.now();
+    const entries = codes.map((code, idx) => {
+      const it = data.items.find((i) => i.code === code);
+      return {
+        id: (isOut ? "out" : "in") + "-" + now + "-" + idx, code, name: it?.name || "", date: todayISO(), qty,
+        notes: "تسجيل جماعي من قائمة الأغراض",
+        ...(isOut ? { returnType: "consume", returned: false } : {}),
+      };
+    });
+    const key = isOut ? "outgoing" : "incoming";
+    setData({ ...data, [key]: [...entries, ...data[key]] });
+    notify(isOut ? `تم تسجيل خروج ${qty} لكل صنف من ${codes.length} صنفاً محدداً` : `تم تسجيل دخول ${qty} لكل صنف من ${codes.length} صنفاً محدداً`);
+    setSelectedCodes(new Set());
+    setBulkQty("");
+    if (systemNotify) {
+      systemNotify({
+        eventLevel: "all",
+        title: isOut ? "المستودع — تسجيل خروج جماعي" : "المستودع — تسجيل دخول جماعي",
+        body: `${codes.length} صنفاً — الكمية ${qty} لكل صنف`,
+        tag: "warehouse-bulk-movement",
+      });
+    }
+  };
+
+  const removeBulk = () => {
+    const codes = new Set(selectedCodes);
+    setData({ ...data, items: data.items.filter((i) => !codes.has(i.code)) });
+    notify(`تم حذف ${codes.size} صنفاً`);
+    setSelectedCodes(new Set());
+    setConfirmBulkDelete(false);
+  };
 
   const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "", initialQty: "1" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
@@ -1608,15 +1727,21 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
           <div className="filter-chips">
             <button
               className={`chip quick-chip-in ${quickMode === "in" ? "chip-active" : ""}`}
-              onClick={() => setQuickMode((m) => (m === "in" ? "off" : "in"))}
+              onClick={() => changeQuickMode("in")}
             >
               <ArrowDownToLine size={13} /> وضع الإدخال
             </button>
             <button
               className={`chip quick-chip-out ${quickMode === "out" ? "chip-active" : ""}`}
-              onClick={() => setQuickMode((m) => (m === "out" ? "off" : "out"))}
+              onClick={() => changeQuickMode("out")}
             >
               <ArrowUpFromLine size={13} /> وضع الإخراج
+            </button>
+            <button
+              className={`chip quick-chip-select ${quickMode === "select" ? "chip-active" : ""}`}
+              onClick={() => changeQuickMode("select")}
+            >
+              <ListChecks size={13} /> تحديد للحذف
             </button>
           </div>
         )}
@@ -1625,6 +1750,12 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
             <option value="all">كل الأقسام</option>
             {data.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
+        )}
+        {quickMode === "off" && (
+          <div className="view-toggle">
+            <button className={`chip ${view === "grid" ? "chip-active" : ""}`} onClick={() => setView("grid")}>بطاقات</button>
+            <button className={`chip ${view === "list" ? "chip-active" : ""}`} onClick={() => setView("list")}>جدول</button>
+          </div>
         )}
         <button className="btn-ghost" onClick={() => downloadCSV("قائمة_الاغراض.csv", data.items, ["code", "name", "category", "notes", "minQty"])}>
           <Download size={15} /> تصدير CSV
@@ -1670,6 +1801,49 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
         )}
       </div>
 
+      {quickMode !== "off" && (
+        <div className="bulk-bar">
+          <label className="bulk-bar-selectall">
+            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+            تحديد الكل ({filtered.length})
+          </label>
+          <span className="bulk-bar-count">{selectedCodes.size} محدد</span>
+          {(quickMode === "in" || quickMode === "out") && (
+            <>
+              <input
+                type="number" lang="en" min="0" step="1" className="input mono bulk-bar-qty"
+                placeholder="الكمية لكل صنف"
+                value={bulkQty}
+                onChange={(e) => setBulkQty(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") applyBulk(); }}
+              />
+              <button
+                className={`btn-primary bulk-bar-apply ${quickMode === "out" ? "btn-danger" : ""}`}
+                onClick={applyBulk}
+                disabled={selectedCodes.size === 0}
+              >
+                {quickMode === "in" ? <ArrowDownToLine size={15} /> : <ArrowUpFromLine size={15} />}
+                تطبيق على المحدد
+              </button>
+            </>
+          )}
+          {!readOnly && (
+            <button
+              className="btn-danger bulk-bar-delete"
+              onClick={() => setConfirmBulkDelete(true)}
+              disabled={selectedCodes.size === 0}
+            >
+              <Trash2 size={15} /> حذف المحددين
+            </button>
+          )}
+          {selectedCodes.size > 0 && (
+            <button className="btn-ghost bulk-bar-clear" onClick={() => setSelectedCodes(new Set())}>
+              إلغاء التحديد
+            </button>
+          )}
+        </div>
+      )}
+
       {searchCameraOpen && (
         <BarcodeCameraModal
           onClose={() => setSearchCameraOpen(false)}
@@ -1680,23 +1854,62 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
       <div className="panel">
         {filtered.length === 0 ? (
           <EmptyState icon={Package} title="لا توجد أصناف مطابقة" hint="جرّب كلمة بحث مختلفة أو أضف صنفاً جديداً" />
+        ) : quickMode === "off" && view === "grid" ? (
+          <div className="inv-card-grid">
+            {filtered.map((it) => (
+              <div className={`inv-card ${getCardTheme(it, data.itemGroups) ? `inv-card-${getCardTheme(it, data.itemGroups)}` : ""}`} key={it.code}>
+                <div className="inv-card-head">
+                  <span className="cell-strong">
+                    {it.emoji ? `${it.emoji} ` : ""}{it.name}
+                    {it.isContainer && <span className="box-badge">📦 صندوق</span>}
+                  </span>
+                </div>
+                <CodeTag code={it.code} />
+                <div className="inv-card-loc">
+                  <MapPin size={12} style={{ opacity: 0.55 }} /> {it.category || "—"}
+                  {branchName(it.branch) ? ` · ${branchName(it.branch)}` : ""}
+                  {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
+                </div>
+                {it.notes && <div className="inv-card-loc">{it.notes}</div>}
+                {!readOnly && (
+                  <div className="row-actions" style={{ marginTop: "auto", paddingTop: 4 }}>
+                    {it.isContainer && (
+                      <button className="icon-btn" title="عرض المحتويات" onClick={() => setBoxView(it)}><Boxes size={15} /></button>
+                    )}
+                    <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
+                    <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="table-wrap">
             <table className="ledger-table">
               <thead>
                 <tr>
+                  {quickMode !== "off" && (
+                    <th className="table-select-col">
+                      <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} title="تحديد الكل" />
+                    </th>
+                  )}
                   <th>م</th>
                   <th>الكود</th>
                   <th>اسم المنتج</th>
                   <th>الموقع / الفئة</th>
                   <th>القسم</th>
-                  {quickMode === "off" ? <th>ملاحظات</th> : <th>الرصيد الحالي</th>}
+                  {quickMode === "in" || quickMode === "out" ? <th>الرصيد الحالي</th> : <th>ملاحظات</th>}
                   {!readOnly && <th></th>}
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((it, idx) => (
-                  <tr key={it.code}>
+                  <tr key={it.code} className={quickMode !== "off" && selectedCodes.has(it.code) ? "row-selected" : ""}>
+                    {quickMode !== "off" && (
+                      <td className="table-select-col">
+                        <input type="checkbox" checked={selectedCodes.has(it.code)} onChange={() => toggleSelect(it.code)} />
+                      </td>
+                    )}
                     <td className="cell-mono">{idx + 1}</td>
                     <td><CodeTag code={it.code} /></td>
                     <td className="cell-strong">
@@ -1708,22 +1921,14 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                       {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
                     </td>
                     <td className="cell-muted">{branchName(it.branch) || "—"}</td>
-                    {quickMode === "off" ? (
-                      <td className="cell-muted">{it.notes || "—"}</td>
-                    ) : (
+                    {quickMode === "in" || quickMode === "out" ? (
                       <td className="cell-mono">{balanceFor(it.code)}</td>
+                    ) : (
+                      <td className="cell-muted">{it.notes || "—"}</td>
                     )}
                     {!readOnly && (
                       <td>
-                        {quickMode === "off" ? (
-                          <div className="row-actions">
-                            {it.isContainer && (
-                              <button className="icon-btn" title="عرض المحتويات" onClick={() => setBoxView(it)}><Boxes size={15} /></button>
-                            )}
-                            <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
-                            <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
-                          </div>
-                        ) : (
+                        {quickMode === "in" || quickMode === "out" ? (
                           <div className={`quick-log-row quick-log-${quickMode}`}>
                             <div className="qty-stepper">
                               <button
@@ -1758,6 +1963,14 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                               {quickMode === "in" ? <ArrowDownToLine size={17} /> : <ArrowUpFromLine size={17} />}
                             </button>
                           </div>
+                        ) : (
+                          <div className="row-actions">
+                            {it.isContainer && (
+                              <button className="icon-btn" title="عرض المحتويات" onClick={() => setBoxView(it)}><Boxes size={15} /></button>
+                            )}
+                            <button className="icon-btn" onClick={() => openEdit(it)}><Pencil size={15} /></button>
+                            <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(it)}><Trash2 size={15} /></button>
+                          </div>
                         )}
                       </td>
                     )}
@@ -1783,6 +1996,18 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
           <div className="modal-actions">
             <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
             <button className="btn-danger" onClick={() => remove(confirmDelete.code)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+
+      {confirmBulkDelete && (
+        <Modal title="تأكيد حذف المحددين" onClose={() => setConfirmBulkDelete(false)}>
+          <p className="confirm-text">
+            هل أنت متأكد من حذف {selectedCodes.size} صنفاً محدداً؟ لن يؤثر هذا على السجلات السابقة في الداخل والخارج.
+          </p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmBulkDelete(false)}>إلغاء</button>
+            <button className="btn-danger" onClick={removeBulk}>حذف نهائياً</button>
           </div>
         </Modal>
       )}
@@ -2990,7 +3215,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
   const [locationFilter, setLocationFilter] = useState("all");
   const [groupFilter, setGroupFilter] = useState("all");
   const [branchFilter, setBranchFilter] = useState("all");
-  const [view, setView] = useState("grid"); // grid | list — البطاقات هي الوضع الافتراضي
+  const [view, setView] = useSharedViewMode("grid"); // grid | list — البطاقات هي الوضع الافتراضي، ومحفوظ لكل الموقع
   const [sortKey, setSortKey] = useState("name");
   const [sortDir, setSortDir] = useState(1);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
@@ -3206,7 +3431,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
         ) : view === "grid" ? (
           <div className="inv-card-grid">
             {filtered.map((i) => (
-              <div className="inv-card" key={i.code} id={`inv-item-${i.code}`}>
+              <div className={`inv-card ${getCardTheme(i, itemGroups) ? `inv-card-${getCardTheme(i, itemGroups)}` : ""}`} key={i.code} id={`inv-item-${i.code}`}>
                 <div className="inv-card-head">
                   <span className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</span>
                   <StampBadge status={i.status} />
@@ -3879,7 +4104,7 @@ function UsersPage({ data, setData, notify }) {
                             background: expired ? "var(--red-bg)" : "var(--amber-bg)",
                           }}>
                             <KeyRound size={11} style={{ marginLeft: 3, verticalAlign: "-1px" }} />
-                            {expired ? "منتهية" : `مؤقتة حتى ${new Date(u.tempUntil).toLocaleString("ar-SA")}`}
+                            {expired ? "منتهية" : `مؤقتة حتى ${new Date(u.tempUntil).toLocaleString("ar-SA-u-nu-latn")}`}
                           </span>
                         ) : (
                           <span className="stamp-badge" style={{ color: "var(--green)", borderColor: "var(--green)", background: "var(--green-bg)" }}>دائمة</span>
@@ -3926,7 +4151,7 @@ function UserForm({ user, branches, onCancel, onSave }) {
   return (
     <div className="form-grid">
       <Field label="الاسم الحقيقي (يظهر في سجل النشاط)">
-        <input className="input" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: محمد" />
+        <input className="input" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: محمد العتيبي" />
       </Field>
       <Field label="اسم المستخدم">
         <input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="مثال: mohammed" />
@@ -4516,7 +4741,7 @@ function AuditPage({ log, isOwner, currentUser }) {
     .filter((e) => byFilter === "all" || (e.by || "—") === byFilter)
     .filter((e) => fuzzyIncludes(e.msg + (e.by || ""), query));
 
-  const rows = filtered.map((e) => ({ time: new Date(e.time).toLocaleString("ar-SA"), by: e.by || "—", event: e.msg }));
+  const rows = filtered.map((e) => ({ time: new Date(e.time).toLocaleString("ar-SA-u-nu-latn"), by: e.by || "—", event: e.msg }));
 
   return (
     <div className="page">
@@ -4559,7 +4784,7 @@ function AuditPage({ log, isOwner, currentUser }) {
                           {c.label}
                         </span>
                       </td>
-                      <td className="cell-mono" title={new Date(e.time).toLocaleString("ar-SA")}>{timeAgoAr(e.time)}</td>
+                      <td className="cell-mono" title={new Date(e.time).toLocaleString("ar-SA-u-nu-latn")}>{timeAgoAr(e.time)}</td>
                       <td className="cell-strong">{e.by || "—"}</td>
                       <td className="cell-strong">{e.msg}</td>
                     </tr>
@@ -5069,7 +5294,7 @@ function BackupSettingsModal({ data, auditLog, notify, onClose, onRestore }) {
               <div>
                 <div>
                   سيتم استبدال <strong>كل</strong> معلومات الموقع الحالية بمحتوى الملف «{pendingBackup.fileName}»
-                  {pendingBackup.payload.exportedAt ? ` (بتاريخ ${new Date(pendingBackup.payload.exportedAt).toLocaleDateString("ar")})` : ""}
+                  {pendingBackup.payload.exportedAt ? ` (بتاريخ ${new Date(pendingBackup.payload.exportedAt).toLocaleDateString("ar-SA-u-nu-latn")})` : ""}
                   {pendingBackup.payload.owners ? " — بما في ذلك حسابات الرؤساء وكلمات المرور" : ""}.
                   هذا الإجراء لا يمكن التراجع عنه إلا باستعادة نسخة أخرى، وقد يسجّل خروجك من هذا الحساب لو تغيّرت كلمة مروره.
                 </div>
@@ -7115,10 +7340,10 @@ function FontStyles() {
 
       .stamp-badge {
         display: inline-block; font-family: 'Almarai', sans-serif; font-weight: 800; font-size: 11px;
-        padding: 4px 10px; border: 1.5px solid; border-radius: 20px; letter-spacing: 0.01em;
+        padding: 4px 10px; border: 1.5px solid; border-radius: 7px; letter-spacing: 0.01em;
       }
 
-      .move-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; padding: 4px 9px; border-radius: 20px; }
+      .move-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; padding: 4px 9px; border-radius: 7px; }
       .move-in { background: var(--green-bg); color: var(--green); }
       .move-out { background: var(--red-bg); color: var(--red); }
 
@@ -7133,7 +7358,7 @@ function FontStyles() {
       }
       .search-cam-btn:hover { background: #1E2A33; }
       .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-      .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 20px; padding: 7px 14px; font-size: 12px; font-family: 'Tajawal'; font-weight: 500; cursor: pointer; color: var(--ink-soft); }
+      .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 7px 14px; font-size: 12px; font-family: 'Tajawal'; font-weight: 500; cursor: pointer; color: var(--ink-soft); }
       .chip-active { background: var(--navy); border-color: var(--navy); color: #F3EEDD; }
       /* عناصر قوائم "الأقسام/المواقع" بشاشة البداية للزوّار — شكل شبه مستطيل
          (زوايا أقل استدارة) بدل الشكل البيضاوي الكامل المستخدم بباقي الشيبس */
@@ -7165,6 +7390,33 @@ function FontStyles() {
         .quick-log-qty { width: 56px; }
         .qty-stepper .quick-log-qty { width: 44px; }
         .qty-stepper-btn { width: 22px; height: 22px; }
+      }
+
+      /* ---------- تحديد جماعي لتطبيق كمية على عدة أصناف دفعة وحدة ---------- */
+      .bulk-bar {
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+        background: var(--kraft); border: 1px solid var(--line); border-radius: 10px;
+        padding: 10px 14px; margin-top: 10px;
+      }
+      .bulk-bar-selectall {
+        display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700;
+        color: var(--ink); cursor: pointer; white-space: nowrap;
+      }
+      .bulk-bar-selectall input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--navy); cursor: pointer; }
+      .bulk-bar-count {
+        font-size: 12px; font-weight: 700; color: var(--ink-soft); background: var(--chip-bg);
+        border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; white-space: nowrap;
+      }
+      .bulk-bar-qty { width: 130px; }
+      .bulk-bar-apply:disabled, .bulk-bar-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+      .bulk-bar-clear { margin-inline-start: auto; }
+      .table-select-col { width: 34px; text-align: center; }
+      .table-select-col input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--navy); cursor: pointer; }
+      tr.row-selected { background: var(--surface-hover); }
+      @media (max-width: 520px) {
+        .bulk-bar { padding: 9px 10px; }
+        .bulk-bar-qty { width: 100px; }
+        .bulk-bar-clear { margin-inline-start: 0; }
       }
 
       /* ---------- BUTTONS ---------- */
@@ -7216,7 +7468,7 @@ function FontStyles() {
       .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--navy); cursor: pointer; }
       .box-contents-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
       .box-contents-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-hover); }
-      .box-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); background: var(--chip-bg); border-radius: 999px; padding: 2px 8px; margin-inline-start: 6px; }
+      .box-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700; color: var(--ink-soft); background: var(--chip-bg); border-radius: 6px; padding: 2px 8px; margin-inline-start: 6px; }
       .field-full { grid-column: 1 / -1; }
       .field-label { font-size: 12px; font-weight: 700; color: var(--ink-soft); }
       .field-hint { font-size: 11px; color: var(--ink-soft); opacity: 0.85; line-height: 1.5; }
@@ -7276,7 +7528,7 @@ function FontStyles() {
       .camera-status {
         position: absolute; bottom: 12px; right: 50%; transform: translateX(50%);
         background: rgba(0,0,0,0.55); color: #fff; font-size: 12px; font-family: 'Tajawal'; font-weight: 600;
-        padding: 6px 14px; border-radius: 20px; white-space: nowrap;
+        padding: 6px 14px; border-radius: 8px; white-space: nowrap;
       }
       .camera-fallback { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 26px 22px; color: var(--ink-soft); }
       .camera-fallback svg { color: var(--amber); }
@@ -7346,7 +7598,7 @@ function FontStyles() {
       .barcode-section-tag {
         font-size: 10.5px; font-weight: 600; color: var(--ink-soft);
         background: var(--bg); border: 1px solid var(--line);
-        border-radius: 20px; padding: 2px 9px; margin-top: 2px;
+        border-radius: 6px; padding: 2px 9px; margin-top: 2px;
       }
 
       /* ---------- TOAST ---------- */
@@ -7420,7 +7672,7 @@ function FontStyles() {
       /* ---------- ROLE BADGE ---------- */
       .role-badge {
         display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
-        padding: 7px 12px; border-radius: 20px; margin: 0 16px 10px;
+        padding: 7px 12px; border-radius: 8px; margin: 0 16px 10px;
       }
       .role-badge-guest { background: var(--amber-bg); color: var(--amber); }
       .role-badge-admin { background: var(--green-bg); color: var(--green); }
@@ -7481,6 +7733,296 @@ function FontStyles() {
       .inv-card-balance { font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 700; margin-top: 6px; }
       .inv-card-balance-unit { font-family: 'Tajawal'; font-size: 12px; font-weight: 400; color: var(--ink-soft); }
 
+      /* بطاقة "كتاب" — خلفية بلون جلدي/خشبي تحاكي غلاف كتاب بدل البطاقة
+         العادية، تُطبّق تلقائياً على أي صنف من مجموعة كتب/مكتبة أو باسم
+         يحتوي كلمة "كتاب" — مجرد تمييز بصري، بدون أي تغيير بالبيانات */
+      .inv-card-book, .item-card-book {
+        background: linear-gradient(155deg, #6b4327 0%, #8a5a33 45%, #5a3720 100%);
+        border: 1px solid #402a17;
+        color: #f4e9d8;
+        position: relative;
+        overflow: hidden;
+        box-shadow: inset 0 0 0 1px rgba(244,233,216,0.08);
+      }
+      .inv-card-book::before, .item-card-book::before {
+        content: "";
+        position: absolute;
+        inset-inline-start: 0; top: 0; bottom: 0;
+        width: 10px;
+        background: linear-gradient(rgba(0,0,0,0.28), rgba(0,0,0,0.05));
+        box-shadow: 2px 0 4px rgba(0,0,0,0.25);
+      }
+      .inv-card-book::after, .item-card-book::after {
+        content: "📖";
+        position: absolute;
+        left: -14px; bottom: -18px;
+        font-size: 72px;
+        opacity: 0.16;
+        transform: rotate(-8deg);
+        pointer-events: none;
+      }
+      .inv-card-book .inv-card-loc, .item-card-book .cell-muted { color: #e4d3ba !important; }
+      .inv-card-book .inv-card-balance-unit { color: #e4d3ba; }
+      .inv-card-book .cell-strong, .item-card-book .cell-strong { color: #f4e9d8; }
+
+      /* بطاقات المواد — كل مجموعة تاخذ شكل بطاقة يحاكي مادتها الحقيقية بدل
+         الشكل العادي الموحّد، بنفس فكرة بطاقة "غلاف الكتاب" أعلاه. كل الأشكال
+         التالية مجرد تمييز بصري ولا تُغيّر أي بيانات. */
+
+      /* بلاستيك — قنينة شفافة بلمعة زجاجية */
+      .inv-card-plastic {
+        background: linear-gradient(155deg, #0b6e77 0%, #12959f 45%, #085158 100%);
+        border: 1px solid #063e44;
+        color: #eafcfb;
+        position: relative;
+        overflow: hidden;
+        box-shadow: inset 0 0 0 1px rgba(234,252,251,0.10);
+      }
+      .inv-card-plastic::before {
+        content: "";
+        position: absolute;
+        inset-inline-start: 22%; top: -20%; bottom: -20%;
+        width: 26%;
+        background: linear-gradient(rgba(255,255,255,0.22), rgba(255,255,255,0.02));
+        transform: rotate(9deg);
+        pointer-events: none;
+      }
+      .inv-card-plastic::after {
+        content: "🧴";
+        position: absolute;
+        left: -10px; bottom: -20px;
+        font-size: 70px;
+        opacity: 0.16;
+        transform: rotate(-6deg);
+        pointer-events: none;
+      }
+      .inv-card-plastic .inv-card-loc, .inv-card-plastic .cell-muted { color: #c9f1ee !important; }
+      .inv-card-plastic .inv-card-balance-unit { color: #c9f1ee; }
+      .inv-card-plastic .cell-strong { color: #f2fffd; }
+
+      /* صحون وأدوات مائدة — طبق خزفي بحافة ذهبية */
+      .inv-card-dishes {
+        background: radial-gradient(circle at 32% 24%, #FFFDF8 0%, #F3ECE0 72%);
+        border: 1px solid #d8c9a8;
+        color: var(--ink);
+        position: relative;
+        overflow: hidden;
+        box-shadow: inset 0 0 0 3px rgba(201,162,39,0.30), inset 0 0 0 5px rgba(201,162,39,0.10);
+      }
+      .inv-card-dishes::after {
+        content: "🍽️";
+        position: absolute;
+        left: -8px; bottom: -20px;
+        font-size: 64px;
+        opacity: 0.13;
+        transform: rotate(-4deg);
+        pointer-events: none;
+      }
+      .inv-card-dishes .inv-card-loc { color: var(--ink-soft) !important; }
+
+      /* ورقيات — صفحة دفتر مسطّرة بحاشية حمراء وطية زاوية */
+      .inv-card-paper {
+        background:
+          repeating-linear-gradient(180deg, transparent 0 27px, rgba(43,59,71,0.08) 27px 28px),
+          #FAF6EC;
+        border: 1px solid var(--line);
+        border-inline-start: 3px solid #B23A2E;
+        color: var(--ink);
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-paper::after {
+        content: "";
+        position: absolute;
+        top: 0; inset-inline-end: 0;
+        width: 0; height: 0;
+        border-style: solid;
+        border-width: 0 18px 18px 0;
+        border-color: transparent var(--kraft-deep) transparent transparent;
+        opacity: 0.9;
+      }
+      .inv-card-paper .inv-card-loc { color: var(--ink-soft) !important; }
+
+      /* منظفات — فقاعات صابون منعشة */
+      .inv-card-cleaning {
+        background:
+          radial-gradient(circle at 18% 30%, rgba(255,255,255,0.55) 0 10px, transparent 11px),
+          radial-gradient(circle at 78% 18%, rgba(255,255,255,0.40) 0 6px, transparent 7px),
+          radial-gradient(circle at 65% 62%, rgba(255,255,255,0.35) 0 14px, transparent 15px),
+          radial-gradient(circle at 30% 78%, rgba(255,255,255,0.45) 0 8px, transparent 9px),
+          linear-gradient(155deg, #1f9fae 0%, #6fd9c8 100%);
+        border: 1px solid #16636e;
+        color: #ffffff;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-cleaning::after {
+        content: "🧼";
+        position: absolute;
+        left: -8px; bottom: -18px;
+        font-size: 62px;
+        opacity: 0.18;
+        transform: rotate(-8deg);
+        pointer-events: none;
+      }
+      .inv-card-cleaning .inv-card-loc, .inv-card-cleaning .cell-muted { color: #eafffb !important; }
+      .inv-card-cleaning .inv-card-balance-unit { color: #eafffb; }
+      .inv-card-cleaning .cell-strong { color: #ffffff; }
+
+      /* ماء — قطرات وموجة هادئة */
+      .inv-card-water {
+        background: linear-gradient(180deg, #EAF6FB 0%, #CFEAF5 60%, #A9D9EA 100%);
+        border: 1px solid #8FC3D8;
+        color: #0B3B4A;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-water::after {
+        content: "💧";
+        position: absolute;
+        left: -6px; bottom: -16px;
+        font-size: 60px;
+        opacity: 0.20;
+        pointer-events: none;
+      }
+      .inv-card-water .inv-card-loc { color: #3D6B7A !important; }
+      .inv-card-water .inv-card-balance-unit { color: #3D6B7A; }
+
+      /* كرتون — صندوق تعبئة مموّج بشريط لاصق */
+      .inv-card-cardboard {
+        background:
+          repeating-linear-gradient(0deg, rgba(0,0,0,0.07) 0 2px, transparent 2px 7px),
+          linear-gradient(155deg, #B98C55 0%, #96703F 55%, #7A5A31 100%);
+        border: 1px solid #5E4526;
+        color: #F6ECD9;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-cardboard::before {
+        content: "";
+        position: absolute;
+        inset-inline-start: -10%; top: 38%;
+        width: 120%; height: 22px;
+        background: rgba(230,210,175,0.35);
+        transform: rotate(-4deg);
+        pointer-events: none;
+      }
+      .inv-card-cardboard::after {
+        content: "📦";
+        position: absolute;
+        left: -8px; bottom: -18px;
+        font-size: 62px;
+        opacity: 0.18;
+        pointer-events: none;
+      }
+      .inv-card-cardboard .inv-card-loc, .inv-card-cardboard .cell-muted { color: #E9D9BC !important; }
+      .inv-card-cardboard .inv-card-balance-unit { color: #E9D9BC; }
+      .inv-card-cardboard .cell-strong { color: #FBF3E4; }
+
+      /* كهرباء — تحذير جهد عالٍ بشريط أصفر/أسود */
+      .inv-card-electrical {
+        background: linear-gradient(160deg, #1B1F22 0%, #262C30 100%);
+        border: 1px solid #000000;
+        color: #F5E9C8;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-electrical::before {
+        content: "";
+        position: absolute;
+        top: 0; inset-inline-start: 0; inset-inline-end: 0;
+        height: 7px;
+        background: repeating-linear-gradient(45deg, #F2C230 0 10px, #1B1F22 10px 20px);
+      }
+      .inv-card-electrical::after {
+        content: "⚡";
+        position: absolute;
+        left: -6px; bottom: -16px;
+        font-size: 60px;
+        opacity: 0.20;
+        color: #F2C230;
+        pointer-events: none;
+      }
+      .inv-card-electrical .inv-card-loc, .inv-card-electrical .cell-muted { color: #C9BC96 !important; }
+      .inv-card-electrical .inv-card-balance-unit { color: #C9BC96; }
+      .inv-card-electrical .cell-strong { color: #F9EFD3; }
+
+      /* سلامة وإطفاء — إنذار أحمر بشريط تحذيري */
+      .inv-card-safety {
+        background: linear-gradient(155deg, #7A1F1F 0%, #A8302A 55%, #5C1414 100%);
+        border: 1px solid #3D0E0E;
+        color: #FBE4E0;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-safety::before {
+        content: "";
+        position: absolute;
+        top: 0; inset-inline-start: 0;
+        width: 40px; height: 40px;
+        background: repeating-linear-gradient(45deg, #FBE4E0 0 6px, transparent 6px 12px);
+        opacity: 0.25;
+        clip-path: polygon(0 0, 100% 0, 0 100%);
+      }
+      .inv-card-safety::after {
+        content: "🧯";
+        position: absolute;
+        left: -8px; bottom: -18px;
+        font-size: 62px;
+        opacity: 0.18;
+        pointer-events: none;
+      }
+      .inv-card-safety .inv-card-loc, .inv-card-safety .cell-muted { color: #F0C6C0 !important; }
+      .inv-card-safety .inv-card-balance-unit { color: #F0C6C0; }
+      .inv-card-safety .cell-strong { color: #FDEEEB; }
+
+      /* أدوات وصيانة — معدن مصقول */
+      .inv-card-tools {
+        background:
+          repeating-linear-gradient(115deg, rgba(255,255,255,0.05) 0 3px, transparent 3px 9px),
+          linear-gradient(155deg, #5C6670 0%, #7C8894 45%, #454E56 100%);
+        border: 1px solid #333B41;
+        color: #EEF1F3;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-tools::after {
+        content: "🛠️";
+        position: absolute;
+        left: -8px; bottom: -18px;
+        font-size: 62px;
+        opacity: 0.16;
+        transform: rotate(-6deg);
+        pointer-events: none;
+      }
+      .inv-card-tools .inv-card-loc, .inv-card-tools .cell-muted { color: #CBD2D8 !important; }
+      .inv-card-tools .inv-card-balance-unit { color: #CBD2D8; }
+      .inv-card-tools .cell-strong { color: #F7F9FA; }
+
+      /* قرطاسية ومكتب — دفتر رسم بيانياً كحلي */
+      .inv-card-stationery {
+        background:
+          repeating-linear-gradient(0deg, rgba(255,255,255,0.06) 0 1px, transparent 1px 18px),
+          repeating-linear-gradient(90deg, rgba(255,255,255,0.06) 0 1px, transparent 1px 18px),
+          var(--navy);
+        border: 1px solid #16202A;
+        color: #EEF3F7;
+        position: relative;
+        overflow: hidden;
+      }
+      .inv-card-stationery::after {
+        content: "📎";
+        position: absolute;
+        left: -6px; bottom: -16px;
+        font-size: 58px;
+        opacity: 0.18;
+        transform: rotate(12deg);
+        pointer-events: none;
+      }
+      .inv-card-stationery .inv-card-loc, .inv-card-stationery .cell-muted { color: #B9C6D2 !important; }
+      .inv-card-stationery .inv-card-balance-unit { color: #B9C6D2; }
+      .inv-card-stationery .cell-strong { color: #F7FAFC; }
+
       /* تمييز لحظي للصنف بعد وصوله من نتيجة البحث العام: هالة تنبض ثم
          تختفي تدريجياً، تعمل على البطاقة وعلى صف الجدول معاً */
       .inv-card-highlight {
@@ -7511,7 +8053,7 @@ function FontStyles() {
 
       /* ---------- ربط ماسح الجوال (Scanner Pairing) ---------- */
       .scanner-pair-body { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 4px 2px 8px; }
-      .scanner-status { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 700; padding: 6px 12px; border-radius: 999px; }
+      .scanner-status { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 700; padding: 6px 12px; border-radius: 8px; }
       .scanner-status-wait { background: var(--amber-bg); color: var(--amber); }
       .scanner-status-on { background: var(--green-bg); color: var(--green); }
       .scanner-code-display {
