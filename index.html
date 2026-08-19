@@ -299,6 +299,17 @@ function genId(prefix) {
   return prefix + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+// يولّد رقم باركود عشوائي مكوّن من 10 أرقام، ويتأكد أنه غير مكرر مع أي
+// باركود موجود مسبقاً بالقائمة المُمرَّرة (existingBarcodes)
+function generateBarcodeNumber(existingBarcodes) {
+  const list = existingBarcodes || [];
+  let code;
+  do {
+    code = String(Math.floor(1000000000 + Math.random() * 9000000000));
+  } while (list.some((b) => b.number === code));
+  return code;
+}
+
 // تطبيع نص عربي للبحث المرن: يوحّد الهمزات (أ إ آ ا)، الياء/الألف المقصورة
 // (ي ى)، التاء المربوطة/الهاء (ة ه)، يشيل التشكيل والتطويل، ويطبّع الأرقام
 // العربية للإنجليزية — حتى البحث يلقى النتيجة رغم فروقات الكتابة الشائعة.
@@ -3501,13 +3512,26 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
 
   const openAdd = () => setModal({
     mode: "add",
-    row: { name: "", number: "", branch: sectionFilter !== "all" && sectionFilter !== "unassigned" ? sectionFilter : "" },
+    row: {
+      name: "",
+      number: generateBarcodeNumber(data.barcodes),
+      branch: sectionFilter !== "all" && sectionFilter !== "unassigned" ? sectionFilter : "",
+    },
   });
   const openEdit = (row, idx) => setModal({ mode: "edit", row: { ...row }, idx });
 
   const save = (row) => {
     if (!row.name.trim() || !row.number.trim()) {
       notify("الاسم والرقم مطلوبان", "error");
+      return;
+    }
+    // تأكيد عدم تكرار رقم الباركود مع أي كود آخر مسجّل مسبقاً (باستثناء
+    // نفس الصف الجاري تعديله بوضع "تعديل")
+    const duplicateIdx = data.barcodes.findIndex(
+      (b, i) => b.number === row.number.trim() && (modal.mode !== "edit" || i !== modal.idx)
+    );
+    if (duplicateIdx >= 0) {
+      notify(`هذا الرقم مستخدم مسبقاً لـ «${data.barcodes[duplicateIdx].name}»`, "error");
       return;
     }
     let barcodes;
@@ -3641,7 +3665,15 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
 
       {modal && (
         <Modal title={modal.mode === "add" ? "إضافة باركود" : "تعديل الباركود"} onClose={() => setModal(null)}>
-          <BarcodeForm row={modal.row} branches={branches} onCancel={() => setModal(null)} onSave={save} />
+          <BarcodeForm
+            row={modal.row}
+            branches={branches}
+            mode={modal.mode}
+            currentIdx={modal.idx}
+            existingBarcodes={data.barcodes}
+            onCancel={() => setModal(null)}
+            onSave={save}
+          />
         </Modal>
       )}
 
@@ -3660,32 +3692,40 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
   );
 }
 
-function BarcodeForm({ row, branches, onCancel, onSave }) {
+function BarcodeForm({ row, branches, mode, currentIdx, existingBarcodes, onCancel, onSave }) {
   const [form, setForm] = useState(row);
   const [cameraOpen, setCameraOpen] = useState(false);
+
+  // بوضع "الإضافة" نكتفي باسم المنتج والقسم فقط، والرقم يتولّد تلقائياً
+  // (10 أرقام عشوائية غير مكررة) دون الحاجة لمسحه أو كتابته يدوياً
+  const isAutoNumber = mode === "add";
+
+  // فحص مباشر (أثناء الكتابة) للتأكد إن الرقم المكتوب/الممسوح مو مستخدم
+  // من قبل لكود آخر — يظهر تنبيه فوري ويمنع الحفظ لحين تصحيحه
+  const list = existingBarcodes || [];
+  const duplicate = list.find(
+    (b, i) => b.number === (form.number || "").trim() && (mode !== "edit" || i !== currentIdx)
+  );
 
   const handleCameraDetect = (value) => {
     setCameraOpen(false);
     setForm((f) => ({ ...f, number: value.trim() }));
   };
 
+  const regenerate = () => {
+    setForm((f) => ({ ...f, number: generateBarcodeNumber(existingBarcodes) }));
+  };
+
   return (
     <>
     <div className="form-grid">
-      <Field label="اسم الشيء">
-        <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-      </Field>
-      <Field label={<span className="scan-label"><ScanLine size={13} /> الرقم <span className="scan-hint">جاهز للمسح</span></span>}>
-        <div className="scan-input-row">
-          <input
-            className="input mono scan-input"
-            value={form.number}
-            onChange={(e) => setForm({ ...form, number: e.target.value.trim() })}
-            placeholder="امسح الباركود أو اكتب الرقم يدوياً"
-            autoComplete="off"
-          />
-          <ScanCameraButton onClick={() => setCameraOpen(true)} />
-        </div>
+      <Field label="اسم المنتج">
+        <input
+          className="input"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+          autoFocus
+        />
       </Field>
       <Field label="القسم">
         <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
@@ -3693,9 +3733,37 @@ function BarcodeForm({ row, branches, onCancel, onSave }) {
           {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
       </Field>
+      {isAutoNumber ? (
+        <Field label={<span className="scan-label"><ScanLine size={13} /> الرقم <span className="scan-hint">تم توليده تلقائياً</span></span>}>
+          <div className="scan-input-row">
+            <input className="input mono scan-input" value={form.number} readOnly />
+            <button type="button" className="icon-btn" title="توليد رقم جديد" onClick={regenerate}>
+              <RefreshCw size={14} />
+            </button>
+          </div>
+        </Field>
+      ) : (
+        <Field label={<span className="scan-label"><ScanLine size={13} /> الرقم <span className="scan-hint">جاهز للمسح</span></span>}>
+          <div className="scan-input-row">
+            <input
+              className="input mono scan-input"
+              value={form.number}
+              onChange={(e) => setForm({ ...form, number: e.target.value.trim() })}
+              placeholder="امسح الباركود أو اكتب الرقم يدوياً"
+              autoComplete="off"
+            />
+            <ScanCameraButton onClick={() => setCameraOpen(true)} />
+          </div>
+          {duplicate && (
+            <div className="scan-duplicate-warning">
+              <Barcode size={12} /> هذا الرقم مستخدم مسبقاً لـ «{duplicate.name}»
+            </div>
+          )}
+        </Field>
+      )}
       <div className="modal-actions">
         <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
-        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+        <button className="btn-primary" disabled={!!duplicate} onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
       </div>
     </div>
     {cameraOpen && <BarcodeCameraModal onDetect={handleCameraDetect} onClose={() => setCameraOpen(false)} />}
@@ -8050,6 +8118,7 @@ function FontStyles() {
       /* تلميح "تم التعرف عليه من قائمة الباركودات" أسفل حقل الكود بنموذج
          إضافة الصنف */
       .barcode-match-hint { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--olive); margin-top: 6px; }
+      .scan-duplicate-warning { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: #B23A3A; margin-top: 6px; }
 
       /* ---------- ربط ماسح الجوال (Scanner Pairing) ---------- */
       .scanner-pair-body { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 4px 2px 8px; }
