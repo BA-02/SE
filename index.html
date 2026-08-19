@@ -131,7 +131,7 @@ import {
   ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert,
   Users, KeyRound, Layers, Shuffle, Eye, EyeOff, Bell, RotateCcw, Sun, Moon, Monitor, ClipboardList,
   BarChart3, PieChart, Percent, TrendingUp, ListChecks, Briefcase, Undo2, Tags,
-  Upload, FolderOpen, HardDriveDownload, Smartphone, RefreshCw, Copy, Wifi, WifiOff
+  Upload, FolderOpen, HardDriveDownload, Smartphone, RefreshCw, Copy, Wifi, WifiOff, PackageCheck
 } from "lucide-react";
 import JsBarcode from "https://esm.sh/jsbarcode@3.11.6";
 
@@ -461,6 +461,93 @@ const AUDIT_KEY = "warehouse-audit-log-v1";
 // Data now lives in Firebase (Firestore) and syncs in real time across devices
 // (laptop, phone, tablet) via window.subscribeStorage — see the Firebase layer above.
 
+/* ------------------------------------------------------------------ */
+/*  DAMAJ DHAKI (SMART MERGE) — يمنع ضياع بيانات جهاز عند حفظ جهاز آخر
+    بنفس اللحظة تقريباً. بدل ما نكتب فوق الوثيقة كاملة، نقارن "قبل" و
+    "بعد" تعديل هذا الجهاز مع أحدث نسخة فعلية بالسيرفر، ونطبّق فرق
+    هذا الجهاز فقط (إضافة/تعديل/حذف) فوق تلك النسخة، صنف بصنف، بدل
+    استبدال القائمة بأكملها.                                          */
+/* ------------------------------------------------------------------ */
+const ARRAY_ID_KEYS = {
+  items: "code",
+  incoming: "id",
+  outgoing: "id",
+  barcodes: "number",
+  activities: "id",
+  users: "id",
+  owners: "id",
+  branches: "id",
+  tasks: "id",
+  itemGroups: "id",
+  auditLog: "id",
+};
+
+function mergeArrayField(latestArr, beforeArr, afterArr, idKey) {
+  if (!Array.isArray(latestArr) || !Array.isArray(beforeArr) || !Array.isArray(afterArr)) {
+    return Array.isArray(afterArr) ? afterArr : [];
+  }
+  const beforeMap = new Map(beforeArr.map((x) => [x?.[idKey], x]));
+  const afterMap = new Map(afterArr.map((x) => [x?.[idKey], x]));
+  const latestMap = new Map(latestArr.map((x) => [x?.[idKey], x]));
+
+  // ابدأ من النسخة الفعلية بالسيرفر — تحترم تعديلات باقي الأجهزة
+  const resultMap = new Map(latestMap);
+
+  // طبّق ما أضافه/عدّله هذا الجهاز محلياً فقط
+  for (const [id, afterItem] of afterMap) {
+    if (id === undefined) continue;
+    const beforeItem = beforeMap.get(id);
+    const changedLocally = !beforeItem || JSON.stringify(beforeItem) !== JSON.stringify(afterItem);
+    if (changedLocally) resultMap.set(id, afterItem);
+  }
+  // طبّق ما حذفه هذا الجهاز محلياً فقط (كان موجوداً قبل التعديل ومفقود بعده)
+  for (const [id] of beforeMap) {
+    if (id !== undefined && !afterMap.has(id)) resultMap.delete(id);
+  }
+
+  // إعادة بناء الترتيب: أولاً بترتيب afterArr (يحافظ على ترتيب القوائم
+  // اللي تُضاف بالمقدمة مثل سجلات الوارد/الصادر)، ثم أي عناصر متبقية من
+  // latestArr (تعديلات أجهزة أخرى لم تظهر بترتيب afterArr)
+  const seen = new Set();
+  const ordered = [];
+  for (const item of afterArr) {
+    const id = item?.[idKey];
+    if (id !== undefined && resultMap.has(id) && !seen.has(id)) {
+      ordered.push(resultMap.get(id));
+      seen.add(id);
+    }
+  }
+  for (const item of latestArr) {
+    const id = item?.[idKey];
+    if (id !== undefined && resultMap.has(id) && !seen.has(id)) {
+      ordered.push(resultMap.get(id));
+      seen.add(id);
+    }
+  }
+  for (const [id, item] of resultMap) {
+    if (!seen.has(id)) { ordered.push(item); seen.add(id); }
+  }
+  return ordered;
+}
+
+function smartMergeData(latest, before, after) {
+  const result = { ...latest };
+  const beforeSafe = before || {};
+  for (const key of Object.keys(after)) {
+    const idKey = ARRAY_ID_KEYS[key];
+    if (idKey && Array.isArray(after[key])) {
+      result[key] = mergeArrayField(latest[key], beforeSafe[key], after[key], idKey);
+    } else if (JSON.stringify(beforeSafe[key]) !== JSON.stringify(after[key])) {
+      // حقل عادي (مو قائمة، أو قائمة بدون مفتاح هوية معروف) وتغيّر محلياً
+      // بهذا التعديل تحديداً: خذ قيمتنا نحن (نادر الحدوث ومحصور بحقول
+      // إعدادات عامة، ليس قوائم أصناف/سجلات).
+      result[key] = after[key];
+    }
+    // إن لم يتغيّر هذا الحقل بتعديلنا المحلي، يبقى كما هو بالسيرفر (latest)
+  }
+  return result;
+}
+
 function useStore(onRemoteUpdate) {
   const [data, setData] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -512,33 +599,31 @@ function useStore(onRemoteUpdate) {
             // ونعرض الموقع كـ "غير متصل" حتى لا نمحو بيانات حقيقية بالخطأ.
             let everLoaded = false;
             try { everLoaded = localStorage.getItem(EVER_LOADED_KEY) === "1"; } catch {}
-            if (everLoaded) {
-              let cached = null;
-              try {
-                const raw = localStorage.getItem(READ_CACHE_KEY);
-                if (raw) cached = withDefaults(JSON.parse(raw));
-              } catch {}
-              if (cached) {
-                dataRef.current = cached;
-                setData(cached);
-                setOnline(false);
-              } else {
-                const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
-                dataRef.current = seed;
-                setData(seed);
-                setOnline(true);
-                setLastSynced(Date.now());
-              }
+            let cached = null;
+            try {
+              const raw = localStorage.getItem(READ_CACHE_KEY);
+              if (raw) cached = withDefaults(JSON.parse(raw));
+            } catch {}
+            if (cached) {
+              // نستخدم آخر نسخة معروفة محلياً بدل بيانات تجريبية، ونعتبر
+              // أنفسنا "غير متصلين" حتى تصلنا نسخة حقيقية من الخادم —
+              // منعاً لعرض بيانات ناقصة على أنها مؤكدة.
+              dataRef.current = cached;
+              setData(cached);
+              setOnline(false);
             } else {
+              // لا يوجد أي وثيقة بالخادم بهذا المفتاح، ولا نسخة محفوظة
+              // محلياً على هذا الجهاز. نعرض بيانات تجريبية للتصفح فقط —
+              // ولا نكتبها تلقائياً فوق الخادم أبداً (حتى لو أول فتح على
+              // الإطلاق)، لأن أي قراءة فارغة عابرة (خطأ شبكة، صلاحيات،
+              // تأخير مؤقت) قد تُخلط مع "أول فتح فعلي" وتمحو بيانات حقيقية
+              // موجودة أصلاً. أول عملية حفظ حقيقية (إضافة/تعديل من المستخدم)
+              // هي وحدها من ستكتب بيانات فعلية للخادم، عبر persist().
               const seed = withDefaults({ items: seedItems, incoming: seedIncoming, outgoing: seedOutgoing, barcodes: seedBarcodes });
               dataRef.current = seed;
               setData(seed);
-              const serializedSeed = JSON.stringify(seed);
-              lastLocalWriteRef.current = serializedSeed;
-              await window.storage?.set(STORE_KEY, serializedSeed, false);
-              try { localStorage.setItem(EVER_LOADED_KEY, "1"); } catch {}
-              setOnline(true);
-              setLastSynced(Date.now());
+              setOnline(everLoaded ? true : false);
+              if (everLoaded) setLastSynced(Date.now());
             }
           }
         }
@@ -582,41 +667,33 @@ function useStore(onRemoteUpdate) {
 
   const OFFLINE_KEY = "warehouse-offline-pending-v1";
 
-  const persist = useCallback(async (next) => {
-    const serialized = JSON.stringify(next);
+  const OFFLINE_BEFORE_KEY = "warehouse-offline-pending-before-v1";
 
-    // فحص تعارض: تأكد أن ما يوجد حالياً على الخادم لا يزال هو نفس آخر نسخة
-    // نعرفها، قبل أن نكتب فوقها. لو جهاز آخر عدّل البيانات قبلنا مباشرة
-    // (ولم يصلنا إشعاره اللحظي بعد بسبب تأخر بالشبكة)، فهذا يمنع ضياع
-    // تعديل ذلك الجهاز الآخر بصمت — بدل أن يكتشف صاحبه لاحقاً أن بياناته
-    // "اختفت".
+  // دمج ذكي مشترك: يجلب أحدث نسخة فعلية من الخادم ويدمج فرق (before → after)
+  // فوقها صنف بصنف. يُستخدم من persist() مباشرة، ومن flush() لاحقاً عند
+  // مزامنة تعديلات حُفظت محلياً أثناء انقطاع الاتصال.
+  const mergeWithLatest = useCallback(async (before, after) => {
     try {
       const latest = await window.storage?.get(STORE_KEY, false);
-      if (latest?.value && knownRemoteRef.current && latest.value !== knownRemoteRef.current && latest.value !== serialized) {
-        const proceed = window.confirm(
-          "تم تعديل البيانات من جهاز آخر منذ آخر تحديث وصلك.\n" +
-          "لو تابعت الحفظ الآن سيُستبدل ذلك التعديل الآخر بتعديلك الحالي.\n\n" +
-          "اضغط «إلغاء» لتحميل أحدث نسخة أولاً، أو «موافق» للمتابعة والحفظ فوقها."
-        );
-        if (!proceed) {
-          try {
-            const fresh = withDefaults(JSON.parse(latest.value));
-            dataRef.current = fresh;
-            setData(fresh);
-            knownRemoteRef.current = latest.value;
-            try { localStorage.setItem(READ_CACHE_KEY, latest.value); } catch {}
-          } catch {}
-          setSaving(false);
-          return;
-        }
+      if (latest?.value) {
+        const latestData = JSON.parse(latest.value);
+        knownRemoteRef.current = latest.value;
+        return withDefaults(smartMergeData(latestData, before, after));
       }
     } catch {
-      // تعذّر فحص التعارض (غالباً بسبب انقطاع الاتصال) — نكمل عادي، وسيتكفّل
-      // المسار العادي بالأسفل بمعالجة حالة عدم الاتصال.
+      // تعذّر جلب أحدث نسخة (غالباً بسبب انقطاع الاتصال) — نكمل بنسختنا المحلية
     }
+    return after;
+  }, []);
 
-    dataRef.current = next;
-    setData(next);
+  const persist = useCallback(async (next) => {
+    // نسخة "قبل" هذا التعديل تحديداً، لأجل الدمج الذكي
+    const beforeThisEdit = dataRef.current;
+    const finalNext = await mergeWithLatest(beforeThisEdit, next);
+
+    const serialized = JSON.stringify(finalNext);
+    dataRef.current = finalNext;
+    setData(finalNext);
     setSaving(true);
     lastLocalWriteRef.current = serialized;
     try {
@@ -624,27 +701,54 @@ function useStore(onRemoteUpdate) {
       knownRemoteRef.current = serialized;
       setOnline(true);
       setLastSynced(Date.now());
-      try { localStorage.removeItem(OFFLINE_KEY); localStorage.setItem(READ_CACHE_KEY, serialized); } catch {}
+      try {
+        localStorage.removeItem(OFFLINE_KEY);
+        localStorage.removeItem(OFFLINE_BEFORE_KEY);
+        localStorage.setItem(READ_CACHE_KEY, serialized);
+      } catch {}
     } catch {
-      // لا يوجد اتصال بالإنترنت: نحفظ التعديل محلياً وننتظر عودة الاتصال
+      // لا يوجد اتصال بالإنترنت: نحفظ التعديل محلياً وننتظر عودة الاتصال.
+      // نحافظ على أقدم نسخة "قبل" ضمن سلسلة تعديلات أوفلاين متتالية، حتى
+      // نقدر عند عودة الاتصال نعرف بالضبط وش تغيّر محلياً وندمجه صح، بدل
+      // ما نكتب فوق كل شي.
       setOnline(false);
-      try { localStorage.setItem(OFFLINE_KEY, JSON.stringify(next)); } catch {}
+      try {
+        if (!localStorage.getItem(OFFLINE_BEFORE_KEY)) {
+          localStorage.setItem(OFFLINE_BEFORE_KEY, JSON.stringify(beforeThisEdit));
+        }
+        localStorage.setItem(OFFLINE_KEY, JSON.stringify(finalNext));
+      } catch {}
     } finally {
       setSaving(false);
     }
-  }, []);
+  }, [mergeWithLatest]);
+
+
 
   // عند عودة الاتصال، حاول مزامنة أي تعديلات محفوظة محلياً أثناء الانقطاع
   useEffect(() => {
     const flush = async () => {
-      let pending = null;
-      try { pending = localStorage.getItem(OFFLINE_KEY); } catch {}
+      let pending = null, pendingBefore = null;
+      try {
+        pending = localStorage.getItem(OFFLINE_KEY);
+        pendingBefore = localStorage.getItem(OFFLINE_BEFORE_KEY);
+      } catch {}
       if (!pending) return;
       try {
-        lastLocalWriteRef.current = pending;
-        await window.storage?.set(STORE_KEY, pending, false);
-        knownRemoteRef.current = pending;
-        try { localStorage.removeItem(OFFLINE_KEY); } catch {}
+        const afterData = withDefaults(JSON.parse(pending));
+        const beforeData = pendingBefore ? withDefaults(JSON.parse(pendingBefore)) : afterData;
+        const merged = await mergeWithLatest(beforeData, afterData);
+        const serialized = JSON.stringify(merged);
+        lastLocalWriteRef.current = serialized;
+        await window.storage?.set(STORE_KEY, serialized, false);
+        knownRemoteRef.current = serialized;
+        dataRef.current = merged;
+        setData(merged);
+        try {
+          localStorage.removeItem(OFFLINE_KEY);
+          localStorage.removeItem(OFFLINE_BEFORE_KEY);
+          localStorage.setItem(READ_CACHE_KEY, serialized);
+        } catch {}
         setOnline(true);
         setLastSynced(Date.now());
       } catch {}
@@ -652,7 +756,7 @@ function useStore(onRemoteUpdate) {
     window.addEventListener("online", flush);
     flush();
     return () => window.removeEventListener("online", flush);
-  }, []);
+  }, [mergeWithLatest]);
 
   return [data, persist, saving, { online, lastSynced }];
 }
@@ -3510,6 +3614,13 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
   const branches = data.branches || [];
   const sectionName = (id) => branches.find((b) => b.id === id)?.name || "";
 
+  // مجموعة أرقام الباركودات المرتبطة فعلياً بصنف مسجّل بقائمة الأغراض —
+  // تُستخدم لتمييز الباركود بعلامة "مضاف" بدل ترك المستخدم يخمّن
+  const linkedCodes = React.useMemo(
+    () => new Set((data.items || []).map((it) => it.code)),
+    [data.items]
+  );
+
   const openAdd = () => setModal({
     mode: "add",
     row: {
@@ -3645,6 +3756,11 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
                 key={idx}
                 ref={(el) => { cardRefs.current[idx] = el; }}
               >
+                {linkedCodes.has(b.number) && (
+                  <div className="barcode-linked-badge" title="مضاف كصنف في قائمة الأغراض">
+                    <PackageCheck size={11} /> مضاف
+                  </div>
+                )}
                 <RealBarcode value={b.number} />
                 <div className="barcode-number">{b.number}</div>
                 <div className="barcode-name">{b.name}</div>
@@ -6215,15 +6331,32 @@ function ScannerPairing({ isOwner }) {
               {connected ? <><Wifi size={14} /> متصل بالماسح 🟢</> : <><WifiOff size={14} /> جاري الانتظار…</>}
             </div>
 
-            <div className="scanner-code-display">{session?.code ? session.code.split("").join(" ") : "‑ ‑ ‑ ‑"}</div>
-            <p className="scanner-hint">افتح كاميرا الجوال على رابط المسح وادخل هذا الرمز، أو افتح الرابط بالأسفل مباشرة من الجوال</p>
+            {!connected && link && (
+              <div className="scanner-qr-wrap">
+                <img
+                  className="scanner-qr-img"
+                  alt="باركود ربط الجوال"
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(link)}`}
+                />
+              </div>
+            )}
 
-            <div className="scanner-link-row">
-              <input className="input scanner-link-input mono" readOnly value={link} onFocus={(e) => e.target.select()} />
-              <button type="button" className="icon-btn" title="نسخ الرابط" onClick={copyLink}>
-                {copied ? <Check size={16} /> : <Copy size={16} />}
-              </button>
-            </div>
+            <p className="scanner-hint">
+              {connected
+                ? "الجوال متصل الآن — أي باركود يمسحه يوصل هنا مباشرة"
+                : "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) ليفتح صفحة المسح ويرتبط بجهازك تلقائياً"}
+            </p>
+
+            <details className="scanner-manual-fallback">
+              <summary>الرمز ما اشتغل؟ أدخله يدوياً</summary>
+              <div className="scanner-code-display">{session?.code ? session.code.split("").join(" ") : "‑ ‑ ‑ ‑"}</div>
+              <div className="scanner-link-row">
+                <input className="input scanner-link-input mono" readOnly value={link} onFocus={(e) => e.target.select()} />
+                <button type="button" className="icon-btn" title="نسخ الرابط" onClick={copyLink}>
+                  {copied ? <Check size={16} /> : <Copy size={16} />}
+                </button>
+              </div>
+            </details>
 
             {connected && session?.lastBarcode && (
               <div className="scanner-last-scan">
@@ -7677,6 +7810,13 @@ function FontStyles() {
       .barcode-number { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.05em; margin-top: 4px; }
       .barcode-name { font-size: 12.5px; font-weight: 700; text-align: center; }
       .barcode-actions { position: absolute; top: 6px; left: 6px; }
+      .barcode-linked-badge {
+        position: absolute; top: 6px; right: 6px;
+        display: flex; align-items: center; gap: 3px;
+        font-size: 10px; font-weight: 700; color: #FFFFFF;
+        background: var(--green); border-radius: 999px; padding: 3px 8px;
+        line-height: 1;
+      }
       .barcode-section-tag {
         font-size: 10.5px; font-weight: 600; color: var(--ink-soft);
         background: var(--bg); border: 1px solid var(--line);
@@ -8143,6 +8283,18 @@ function FontStyles() {
         font-family: 'JetBrains Mono', monospace; font-size: 34px; font-weight: 700; letter-spacing: 6px;
         background: var(--chip-bg); border: 1px dashed var(--line); border-radius: 12px; padding: 10px 20px; color: var(--ink);
       }
+      .scanner-qr-wrap {
+        background: #FFFFFF; border-radius: 14px; padding: 14px;
+        border: 1px solid var(--line); display: flex; align-items: center; justify-content: center;
+      }
+      .scanner-qr-img { width: 200px; height: 200px; display: block; }
+      .scanner-manual-fallback { width: 100%; font-size: 12.5px; color: var(--ink-soft); }
+      .scanner-manual-fallback summary {
+        cursor: pointer; text-align: center; padding: 6px; user-select: none;
+        color: var(--navy); font-weight: 700;
+      }
+      .scanner-manual-fallback[open] summary { margin-bottom: 10px; }
+      .scanner-manual-fallback > .scanner-code-display { font-size: 26px; padding: 8px 16px; margin: 0 auto 10px; width: fit-content; }
       .scanner-hint { font-size: 12.5px; color: var(--ink-soft); margin: 0; max-width: 320px; }
       .scanner-link-row { display: flex; gap: 6px; width: 100%; }
       .scanner-link-input { flex: 1; font-size: 12px; direction: ltr; text-align: left; }
