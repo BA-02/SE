@@ -55,71 +55,68 @@
 <body>
 <div id="root"></div>
 
-<!-- طبقة تخزين سحابية: Firebase (Firestore + Realtime عبر onSnapshot) -->
+<!-- طبقة تخزين سحابية: Supabase (Postgres + Realtime عبر postgres_changes) -->
 <script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
-  import {
-    getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot,
-    collection, query, where, orderBy, getDocs, documentId, serverTimestamp,
-  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-  // بيانات مشروع Firebase
-  const firebaseConfig = {
-    apiKey: "AIzaSyAwc6GuzbSEPfRv8Pfgcd29lR1OWXk3GH8",
-    authDomain: "store-986fb.firebaseapp.com",
-    projectId: "store-986fb",
-    storageBucket: "store-986fb.firebasestorage.app",
-    messagingSenderId: "362331275374",
-    appId: "1:362331275374:web:7ccb149051f34a7860a67f",
-    measurementId: "G-HW6Q4SBNHE",
-  };
+  // بيانات مشروع Supabase (استبدلها بمشروعك)
+  const SUPABASE_URL = "https://mptanycarwowbtojeswf.supabase.co";
+  const SUPABASE_ANON_KEY = "sb_publishable_WCOF4gaVOhXHTKSVUT6r4Q_UUoQLSIT";
 
-  const firebaseApp = initializeApp(firebaseConfig);
-  const db = getFirestore(firebaseApp);
-  const COLLECTION = "warehouse_state";
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const TABLE = "warehouse_state";
 
   window.storage = {
     async get(key) {
-      const ref = doc(db, COLLECTION, key);
-      const snap = await getDoc(ref);
-      if (!snap.exists()) return null;
-      const data = snap.data();
-      return { key, value: data.value };
+      const { data, error } = await supabase
+        .from(TABLE).select("key, value").eq("key", key).maybeSingle();
+      if (error) throw error;
+      if (!data) return null;
+      return { key: data.key, value: data.value };
     },
     async set(key, value) {
-      const ref = doc(db, COLLECTION, key);
-      await setDoc(ref, { key, value: String(value), updated_at: serverTimestamp() });
+      const { error } = await supabase
+        .from(TABLE)
+        .upsert({ key, value: String(value), updated_at: new Date().toISOString() });
+      if (error) throw error;
       return { key, value };
     },
     async delete(key) {
-      const ref = doc(db, COLLECTION, key);
-      const snap = await getDoc(ref);
-      const existed = snap.exists();
-      if (existed) await deleteDoc(ref);
+      const { data: existing } = await supabase
+        .from(TABLE).select("key").eq("key", key).maybeSingle();
+      const existed = !!existing;
+      if (existed) {
+        const { error } = await supabase.from(TABLE).delete().eq("key", key);
+        if (error) throw error;
+      }
       return { key, deleted: existed };
     },
     async list(prefix) {
-      const colRef = collection(db, COLLECTION);
-      const q = prefix
-        ? query(colRef, orderBy(documentId()), where(documentId(), ">=", prefix), where(documentId(), "<", prefix + "\uf8ff"))
-        : colRef;
-      const snap = await getDocs(q);
-      return { keys: snap.docs.map((d) => d.id), prefix };
+      let q = supabase.from(TABLE).select("key").order("key");
+      if (prefix) q = q.gte("key", prefix).lt("key", prefix + "\uf8ff");
+      const { data, error } = await q;
+      if (error) throw error;
+      return { keys: (data || []).map((d) => d.key), prefix };
     },
   };
 
-  // مزامنة فورية بين جميع الأجهزة عبر Firestore onSnapshot
+  // مزامنة فورية بين جميع الأجهزة عبر Supabase Realtime
   window.subscribeStorage = function (key, callback) {
-    const ref = doc(db, COLLECTION, key);
-    const unsub = onSnapshot(ref, { includeMetadataChanges: false }, (snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data();
-      callback(data.value, false);
-    });
-    return unsub;
+    const channel = supabase
+      .channel(`storage-${key}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: TABLE, filter: `key=eq.${key}` },
+        (payload) => {
+          if (payload.eventType === "DELETE") return;
+          callback(payload.new.value, false);
+        }
+      )
+      .subscribe();
+    return () => supabase.removeChannel(channel);
   };
 
-  window.firebaseApp = firebaseApp;
+  window.supabaseClient = supabase;
 </script>
 
 <script type="text/babel" data-type="module" data-presets="react">
