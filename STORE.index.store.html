@@ -1615,6 +1615,8 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
   const [branchFilter, setBranchFilter] = useState("all");
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [locationFilter, setLocationFilter] = useState("all");
 
   // وضع التسجيل السريع: يخلي المستخدم يسجّل دخول/خروج البضاعة مباشرة من
   // قائمة الأغراض نفسها بضغطة وحدة، بدل ما يروح لصفحة منفصلة
@@ -1667,7 +1669,25 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
 
   const filtered = branchItems
     .filter((it) => fuzzyIncludes(it.name + it.code + it.category, query))
-    .filter((it) => branchFilter === "all" || it.branch === branchFilter);
+    .filter((it) => branchFilter === "all" || it.branch === branchFilter)
+    .filter((it) => locationFilter === "all" || it.category === locationFilter)
+    .filter((it) => groupFilter === "all" || it.group === groupFilter);
+
+  // خانة "المواقع" بالفلاتر تعتمد على القسم المختار: لو اخترت قسم معيّن
+  // تعرض مواقع هذا القسم فقط، ولو "كل الأقسام" تعرض كل المواقع بدون تمييز
+  const locationsScope = branchFilter === "all" ? branchItems : branchItems.filter((it) => it.branch === branchFilter);
+  const locations = useMemo(
+    () => [...new Set(locationsScope.map((it) => it.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar")),
+    [locationsScope]
+  );
+
+  // لو الموقع المختار حالياً مو موجود بقائمة مواقع القسم الجديد، نرجّع
+  // فلتر الموقع لـ"الكل" حتى ما تصير نتيجة فاضية بصمت
+  useEffect(() => {
+    if (locationFilter !== "all" && !locations.includes(locationFilter)) {
+      setLocationFilter("all");
+    }
+  }, [branchFilter, locations]);
 
   // تحديد جماعي (بمربعات اختيار) لتطبيق نفس كمية الدخول/الخروج على عدة
   // أصناف دفعة وحدة — متاح فقط داخل وضع التسجيل السريع (دخول/خروج)
@@ -1737,7 +1757,10 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
     setConfirmBulkDelete(false);
   };
 
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: myBranch || "", isContainer: false, parentCode: "", initialQty: "1" } });
+  // لو المستخدم فلتر القائمة حالياً على قسم و/أو مجموعة معيّنة، نعبّي حقلي
+  // "القسم" و"المجموعة" في نموذج الإضافة تلقائياً بنفس الفلتر بدل ما يضطر
+  // يختارهم يدوياً من جديد — يبقيان قابلين للتغيير يدوياً بالطبع
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: groupFilter !== "all" ? groupFilter : "", branch: myBranch || (branchFilter !== "all" ? branchFilter : ""), isContainer: false, parentCode: "", initialQty: "1", image: "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -1857,6 +1880,18 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
             </button>
           </div>
         )}
+        {(data.itemGroups || []).length > 0 && (
+          <select className="input location-select" value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
+            <option value="all">كل المجموعات</option>
+            {data.itemGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+        )}
+        {locations.length > 0 && (
+          <select className="input location-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
+            <option value="all">كل المواقع</option>
+            {locations.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+          </select>
+        )}
         {isOwner && (data.branches || []).length > 0 && (
           <select className="input location-select" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
             <option value="all">كل الأقسام</option>
@@ -1970,6 +2005,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
           <div className="inv-card-grid">
             {filtered.map((it) => (
               <div className={`inv-card ${getCardTheme(it, data.itemGroups) ? `inv-card-${getCardTheme(it, data.itemGroups)}` : ""}`} key={it.code}>
+                {it.image && <img className="inv-card-photo" src={it.image} alt={it.name} />}
                 <div className="inv-card-head">
                   <span className="cell-strong">
                     {it.emoji ? `${it.emoji} ` : ""}{it.name}
@@ -2025,6 +2061,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                     <td className="cell-mono">{idx + 1}</td>
                     <td><CodeTag code={it.code} /></td>
                     <td className="cell-strong">
+                      {it.image && <img className="row-thumb" src={it.image} alt={it.name} />}
                       {it.emoji ? `${it.emoji} ` : ""}{it.name}
                       {it.isContainer && <span className="box-badge">📦 صندوق</span>}
                     </td>
@@ -2154,7 +2191,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                   setBoxView(null);
                   setModal({
                     mode: "add",
-                    item: { code: "", name: "", category: boxView.category || "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: boxView.branch || myBranch || "", isContainer: false, parentCode: boxView.code },
+                    item: { code: "", name: "", category: boxView.category || "", notes: "", minQty: "", expiryDate: "", emoji: "", group: "", branch: boxView.branch || myBranch || "", isContainer: false, parentCode: boxView.code, image: "" },
                   });
                 }}
               >
@@ -2214,6 +2251,97 @@ function EmojiPicker({ value, onChange }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  رفع صورة المنتج (اختياري)                                          */
+/*  نضغط الصورة ونصغّرها بالمتصفح (Canvas) قبل تحويلها لنص Base64      */
+/*  حتى لا تكبر بيانات المخزون بلا داعٍ عند رفع صور كبيرة من الجوال    */
+/* ------------------------------------------------------------------ */
+async function fileToCompressedDataURL(file, maxDim = 640, quality = 0.72) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("تعذّرت قراءة الصورة"));
+    reader.readAsDataURL(file);
+  });
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error("تعذّر تحميل الصورة"));
+      im.src = dataUrl;
+    });
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.round(img.width * scale) || 1;
+    const h = Math.round(img.height * scale) || 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", quality);
+  } catch {
+    // لو فشل الضغط لأي سبب (مثلاً صورة غير مدعومة)، نستخدم الصورة الأصلية
+    // كما هي بدل ما نفشل العملية بالكامل
+    return dataUrl;
+  }
+}
+
+function ImageUploadField({ value, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const galleryRef = React.useRef(null);
+  const cameraRef = React.useRef(null);
+
+  const handleFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // يسمح باختيار/تصوير نفس الملف مرة ثانية لاحقاً لو احتاج
+    if (!file) return;
+    setBusy(true);
+    try {
+      const dataUrl = await fileToCompressedDataURL(file);
+      onChange(dataUrl);
+    } catch {
+      // تجاهل بصمت — المستخدم يقدر يعيد المحاولة
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="image-upload-field">
+      {value ? (
+        <div className="image-upload-preview">
+          <img src={value} alt="صورة" />
+          <div className="image-upload-preview-actions">
+            <button type="button" className="btn-ghost" onClick={() => galleryRef.current?.click()}>
+              <FolderOpen size={14} /> رفع صورة
+            </button>
+            <button type="button" className="btn-ghost" onClick={() => cameraRef.current?.click()}>
+              <Camera size={14} /> تصوير
+            </button>
+            <button type="button" className="btn-ghost" onClick={() => onChange("")}>
+              <X size={14} /> إزالة
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="image-upload-actions">
+          {/* رفع من المعرض/الملفات — يشتغل على الجوال والكمبيوتر */}
+          <button type="button" className="btn-ghost" onClick={() => galleryRef.current?.click()} disabled={busy}>
+            <FolderOpen size={15} /> {busy ? "جارٍ التحميل…" : "رفع صورة"}
+          </button>
+          {/* تصوير مباشر — على الجوال يفتح الكاميرا الخلفية مباشرة (capture)،
+              وعلى الكمبيوتر يفتح نفس منتقي الملفات كبديل احتياطي */}
+          <button type="button" className="btn-ghost" onClick={() => cameraRef.current?.click()} disabled={busy}>
+            <Camera size={15} /> {busy ? "جارٍ التحميل…" : "التقط صورة"}
+          </button>
+        </div>
+      )}
+      <input ref={galleryRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFile} />
+      <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFile} />
+    </div>
+  );
+}
+
 function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, currentBalance, onCancel, onSave }) {
   const [form, setForm] = useState({
     isContainer: false, parentCode: "",
@@ -2240,7 +2368,10 @@ function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, curren
   );
   useEffect(() => {
     if (matchedBarcode && !form.name.trim()) {
-      setForm((f) => ({ ...f, name: matchedBarcode.name }));
+      // لو الباركود المطابق مرتبط بصورة مسبقاً (من صفحة الباركودات) نجلبها
+      // ونعرضها تلقائياً مع بيانات الصنف، دون التأثير على صورة اختارها
+      // المستخدم بنفسه لهذا الصنف مسبقاً (بوضع التعديل مثلاً)
+      setForm((f) => ({ ...f, name: matchedBarcode.name, image: f.image || matchedBarcode.image || "" }));
     }
   }, [matchedBarcode]);
 
@@ -2313,6 +2444,12 @@ function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, curren
       </Field>
       <Field label="أيقونة الصنف (اختياري)">
         <EmojiPicker value={form.emoji} onChange={(em) => setForm({ ...form, emoji: em })} />
+      </Field>
+      <Field label="صورة المنتج (اختياري)">
+        <ImageUploadField value={form.image} onChange={(img) => setForm({ ...form, image: img })} />
+        {matchedBarcode && matchedBarcode.image && !form.image && (
+          <div className="field-hint">هذا الباركود مرتبط بصورة محفوظة مسبقاً — ستُعبّأ تلقائياً</div>
+        )}
       </Field>
       <Field label="المجموعة (نوع الصنف)">
         <select className="input" value={form.group || ""} onChange={(e) => pickGroup(e.target.value)}>
@@ -3331,6 +3468,7 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
   const [sortKey, setSortKey] = useState("name");
   const [sortDir, setSortDir] = useState(1);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+  const [boxView, setBoxView] = useState(null); // صنف "صندوق" نعرض محتوياته من صفحة المخزون — عرض فقط بدون تعديل/حذف
 
   // لما يوصل كود صنف من البحث العام: نصفّر كل الفلاتر حتى يضمن ظهور
   // الصنف، ثم نمرّر له ونميّزه لحظياً
@@ -3370,15 +3508,28 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
 
   const groupName = (id) => itemGroups.find((g) => g.id === id)?.name || "";
   const branchName = (id) => (branches || []).find((b) => b.id === id)?.name || "";
+  const itemName = (code) => inventory.find((i) => i.code === code)?.name || "";
 
   // منظم مقيّد بقسم معيّن يشوف بس مخزون قسمه؛ رئيس الموقع يشوف كل شيء دائماً
   const myBranch = !isOwner && currentUser?.restrictedBranch;
   const scopedInventory = myBranch ? inventory.filter((i) => i.branch === myBranch) : inventory;
 
+  // خانة "المواقع" بالفلاتر تعتمد على القسم المختار: لو اخترت قسم معيّن
+  // تعرض مواقع هذا القسم فقط، ولو "كل الأقسام" تعرض كل المواقع بدون تمييز
+  const locationsScope = branchFilter === "all" ? scopedInventory : scopedInventory.filter((i) => i.branch === branchFilter);
+
   const locations = useMemo(
-    () => [...new Set(scopedInventory.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar")),
-    [scopedInventory]
+    () => [...new Set(locationsScope.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar")),
+    [locationsScope]
   );
+
+  // لو الموقع المختار حالياً مو موجود بقائمة مواقع القسم الجديد (بعد تغيير
+  // فلتر القسم)، نرجّع فلتر الموقع لـ"الكل" حتى ما تصير نتيجة فاضية بصمت
+  useEffect(() => {
+    if (locationFilter !== "all" && !locations.includes(locationFilter)) {
+      setLocationFilter("all");
+    }
+  }, [branchFilter, locations]);
 
   // عدد الأصناف بكل موقع — لعرض "قائمة المواقع" بشكل واضح بدل قائمة منسدلة
   // مخفية فقط. المواقع هنا هي حقل "الموقع/الفئة" على كل صنف، وهي مفهوم
@@ -3442,6 +3593,10 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
       {label} {sortKey === k && <ChevronDown size={12} style={{ transform: sortDir === -1 ? "rotate(180deg)" : "none", display: "inline" }} />}
     </th>
   );
+
+  // محتويات الصندوق المعروض حالياً — من inventory نفسه (عرض فقط، بدون
+  // أي إمكانية تعديل أو حذف من هذه الصفحة)
+  const boxContents = boxView ? inventory.filter((i) => i.parentCode === boxView.code) : [];
 
   return (
     <div className="page" id="inventory-page-root">
@@ -3544,14 +3699,24 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
           <div className="inv-card-grid">
             {filtered.map((i) => (
               <div className={`inv-card ${getCardTheme(i, itemGroups) ? `inv-card-${getCardTheme(i, itemGroups)}` : ""}`} key={i.code} id={`inv-item-${i.code}`}>
+                {i.image && <img className="inv-card-photo" src={i.image} alt={i.name} />}
                 <div className="inv-card-head">
-                  <span className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</span>
+                  <span className="cell-strong">
+                    {i.emoji ? `${i.emoji} ` : ""}{i.name}
+                    {i.isContainer && <span className="box-badge">📦 صندوق</span>}
+                    {i.parentCode && <span className="box-badge">↳ داخل: {itemName(i.parentCode) || "—"}</span>}
+                  </span>
                   <StampBadge status={i.status} />
                 </div>
                 <CodeTag code={i.code} />
                 <div className="inv-card-loc"><MapPin size={12} style={{ opacity: 0.55 }} /> {i.category || "—"}{groupName(i.group) ? ` · ${groupName(i.group)}` : ""}{branchName(i.branch) ? ` · ${branchName(i.branch)}` : ""}</div>
                 {i.expiry && <ExpiryBadge expiry={i.expiry} daysLeft={i.daysLeft} />}
                 <div className="inv-card-balance">{i.balance} <span className="inv-card-balance-unit">الكمية</span></div>
+                {i.isContainer && (
+                  <button type="button" className="btn-ghost inv-card-box-btn" onClick={() => setBoxView(i)}>
+                    <Boxes size={15} /> عرض المحتويات
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -3569,13 +3734,19 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
                   <SortHeader label="الكمية" k="balance" />
                   <th>الحالة</th>
                   <SortHeader label="الصلاحية" k="daysLeft" />
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((i) => (
                   <tr key={i.code} id={`inv-item-${i.code}`}>
                     <td><CodeTag code={i.code} /></td>
-                    <td className="cell-strong">{i.emoji ? `${i.emoji} ` : ""}{i.name}</td>
+                    <td className="cell-strong">
+                      {i.image && <img className="row-thumb" src={i.image} alt={i.name} />}
+                      {i.emoji ? `${i.emoji} ` : ""}{i.name}
+                      {i.isContainer && <span className="box-badge">📦 صندوق</span>}
+                      {i.parentCode && <span className="box-badge">↳ داخل: {itemName(i.parentCode) || "—"}</span>}
+                    </td>
                     <td className="cell-muted">{i.category || "—"}</td>
                     <td className="cell-muted">{branchName(i.branch) || "—"}</td>
                     <td className="cell-mono">{i.inQty}</td>
@@ -3583,6 +3754,13 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
                     <td className="cell-mono cell-balance">{i.balance}</td>
                     <td><StampBadge status={i.status} /></td>
                     <td>{i.expiry ? <ExpiryBadge expiry={i.expiry} daysLeft={i.daysLeft} /> : "—"}</td>
+                    <td>
+                      {i.isContainer && (
+                        <button type="button" className="icon-btn" title="عرض المحتويات" onClick={() => setBoxView(i)}>
+                          <Boxes size={15} />
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -3590,6 +3768,29 @@ function InventoryPage({ inventory, itemGroups, branches, onPrint, currentUser, 
           </div>
         )}
       </div>
+
+      {boxView && (
+        <Modal
+          title={`📦 محتويات «${boxView.name}» (عرض فقط)`}
+          onClose={() => setBoxView(null)}
+        >
+          {boxContents.length === 0 ? (
+            <EmptyState icon={Boxes} title="الصندوق فاضي" hint="ما فيه أي منتج مضاف داخل هذا الصندوق حتى الآن" />
+          ) : (
+            <div className="box-contents-list">
+              {boxContents.map((c) => (
+                <div className="box-contents-row" key={c.code}>
+                  <div>
+                    <div className="cell-strong">{c.emoji ? `${c.emoji} ` : ""}{c.name}</div>
+                    <div className="cell-muted" style={{ fontSize: 12 }}>{c.code} · الرصيد: {c.balance}</div>
+                  </div>
+                  <StampBadge status={c.status} />
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }
@@ -3624,9 +3825,30 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
       name: "",
       number: generateBarcodeNumber(data.barcodes),
       branch: sectionFilter !== "all" && sectionFilter !== "unassigned" ? sectionFilter : "",
+      image: "",
     },
   });
   const openEdit = (row, idx) => setModal({ mode: "edit", row: { ...row }, idx });
+
+  // طباعة استكرات: تفعّل تنسيق طباعة خاص (باركود مصغّر بدون اسم المنتج ولا
+  // أي هوامش) عبر إضافة كلاس مؤقت على body، ثم تُزال الكلاس تلقائياً بعد
+  // انتهاء/إلغاء الطباعة — لا يؤثر إطلاقاً على العرض العادي في الشاشة
+  const printStickers = () => {
+    document.body.classList.add("printing-stickers");
+    // @page لا يمكن تقييده بكلاس CSS عادي، لذا نحقن وسم <style> مؤقت
+    // يلغي هوامش الصفحة الافتراضية (12mm) فقط أثناء طباعة الاستكرات
+    const styleEl = document.createElement("style");
+    styleEl.id = "sticker-page-style";
+    styleEl.textContent = "@media print { @page { margin: 0; size: auto; } }";
+    document.head.appendChild(styleEl);
+    const cleanup = () => {
+      document.body.classList.remove("printing-stickers");
+      styleEl.remove();
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    window.print();
+  };
 
   const save = (row) => {
     if (!row.name.trim() || !row.number.trim()) {
@@ -3676,7 +3898,7 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
       notify("كود جديد — أكمل بيانات الباركود", "info");
       setModal({
         mode: "add",
-        row: { name: "", number: code, branch: sectionFilter !== "all" && sectionFilter !== "unassigned" ? sectionFilter : "" },
+        row: { name: "", number: code, branch: sectionFilter !== "all" && sectionFilter !== "unassigned" ? sectionFilter : "", image: "" },
       });
     }
   };
@@ -3706,6 +3928,7 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="btn-ghost" onClick={() => setScanOpen(true)}><Camera size={15} /> مسح سريع</button>
             <button className="btn-ghost" onClick={() => window.print()}><Download size={15} /> طباعة الملصقات</button>
+            <button className="btn-ghost" onClick={printStickers}><Tags size={15} /> طباعة استكرات</button>
             {!readOnly && <button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة باركود</button>}
           </div>
         }
@@ -3758,6 +3981,7 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
                     <PackageCheck size={11} /> مضاف
                   </div>
                 )}
+                {b.image && <img className="barcode-thumb" src={b.image} alt={b.name || "صورة"} />}
                 <RealBarcode value={b.number} />
                 <div className="barcode-number">{b.number}</div>
                 <div className="barcode-name">{b.name}</div>
@@ -3846,6 +4070,10 @@ function BarcodeForm({ row, branches, mode, currentIdx, existingBarcodes, onCanc
           {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
       </Field>
+      <Field label="صورة (اختياري)">
+        <ImageUploadField value={form.image} onChange={(img) => setForm({ ...form, image: img })} />
+        <div className="field-hint">لو رُبطت صورة هنا، ستظهر تلقائياً عند إضافة صنف بهذا الباركود لاحقاً</div>
+      </Field>
       {isAutoNumber ? (
         <Field label={<span className="scan-label"><ScanLine size={13} /> الرقم <span className="scan-hint">تم توليده تلقائياً</span></span>}>
           <div className="scan-input-row">
@@ -3892,11 +4120,14 @@ function GlobalSearch({ data, inventory, go, onPick, currentUser, isOwner }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [searchCameraOpen, setSearchCameraOpen] = useState(false);
+  const [boxView, setBoxView] = useState(null); // صنف "صندوق" نعرض محتوياته بنافذة منبثقة من نتائج البحث العام مباشرة
   const myBranch = !isOwner && currentUser?.restrictedBranch;
   const scoped = myBranch ? inventory.filter((i) => i.branch === myBranch) : inventory;
   const results = q.length > 1
     ? scoped.filter((i) => fuzzyIncludes(i.name + i.code, q)).slice(0, 6)
     : [];
+  const boxContents = boxView ? (data?.items || []).filter((i) => i.parentCode === boxView.code) : [];
+  const balanceFor = (code) => inventory?.find((i) => i.code === code)?.balance ?? 0;
 
   return (
     <div className="global-search">
@@ -3926,15 +4157,67 @@ function GlobalSearch({ data, inventory, go, onPick, currentUser, isOwner }) {
       {open && results.length > 0 && (
         <div className="global-results">
           {results.map((r) => (
-            <button key={r.code} className="global-result-item" onMouseDown={() => { onPick ? onPick(r.code) : go("inventory"); setQ(""); setOpen(false); }}>
-              <div>
-                <div className="cell-strong">{r.emoji ? `${r.emoji} ` : ""}{r.name}</div>
-                <CodeTag code={r.code} />
-              </div>
-              <StampBadge status={r.status} />
-            </button>
+            <div key={r.code} className="global-result-item">
+              <button
+                type="button"
+                className="global-result-main"
+                onMouseDown={() => { onPick ? onPick(r.code) : go("inventory"); setQ(""); setOpen(false); }}
+              >
+                <div>
+                  <div className="cell-strong">
+                    {r.emoji ? `${r.emoji} ` : ""}{r.name}
+                    {r.isContainer && <span className="box-badge">📦 صندوق</span>}
+                  </div>
+                  <CodeTag code={r.code} />
+                </div>
+                <StampBadge status={r.status} />
+              </button>
+              {r.isContainer && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title="فتح الصندوق ومشاهدة المحتويات"
+                  onMouseDown={(e) => { e.preventDefault(); setBoxView(r); setOpen(false); }}
+                >
+                  <Boxes size={15} />
+                </button>
+              )}
+            </div>
           ))}
         </div>
+      )}
+
+      {boxView && (
+        <Modal
+          title={`📦 محتويات «${boxView.name}»`}
+          onClose={() => { setBoxView(null); setQ(""); }}
+        >
+          {boxContents.length === 0 ? (
+            <EmptyState icon={Boxes} title="الصندوق فاضي" hint="ما فيه أي منتج مضاف داخل هذا الصندوق حتى الآن" />
+          ) : (
+            <div className="box-contents-list">
+              {boxContents.map((c) => (
+                <div className="box-contents-row" key={c.code}>
+                  <div>
+                    <div className="cell-strong">{c.emoji ? `${c.emoji} ` : ""}{c.name}</div>
+                    <div className="cell-muted" style={{ fontSize: 12 }}>{c.code} · الرصيد: {balanceFor(c.code)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="modal-actions">
+            <button
+              className="btn-ghost"
+              onClick={() => {
+                setBoxView(null); setQ("");
+                onPick ? onPick(boxView.code) : go("inventory");
+              }}
+            >
+              فتح الصندوق بصفحة المخزون
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -5226,7 +5509,6 @@ function GuestListsWithInventory({ data, inventory, triggerPrint }) {
           inventory={inventory} itemGroups={data.itemGroups} branches={data.branches}
           onPrint={() => triggerPrint("inventory")}
           hideLocationsPanel={data.guestListsConfig?.showLocations !== false}
-          hideLocationFilter
           showBranchFilter
           quickFilter={quickFilter}
         />
@@ -6940,7 +7222,7 @@ function App() {
           ) : data.guestScreen === "dashboard" ? (
             <GuestDashboardSummary inventory={inventory} />
           ) : (
-            <InventoryPage inventory={inventory} itemGroups={data.itemGroups} onPrint={() => triggerPrint("inventory")} />
+            <InventoryPage inventory={inventory} itemGroups={data.itemGroups} branches={data.branches} onPrint={() => triggerPrint("inventory")} showBranchFilter />
           )}
         </main>
 
@@ -7478,6 +7760,7 @@ function FontStyles() {
       .global-result-item { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; background: none; border: none; border-bottom: 1px solid #eee2c9; cursor: pointer; text-align: right; }
       .global-result-item:last-child { border-bottom: none; }
       .global-result-item:hover { background: var(--surface-hover); }
+      .global-result-main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: right; }
 
       .main-area { padding: 24px 28px 60px; flex: 1; }
 
@@ -7946,11 +8229,14 @@ function FontStyles() {
       .emoji-custom-row { display: flex; gap: 6px; }
       .inv-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; padding: 16px; }
       .inv-card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+      .inv-card-photo { width: 100%; height: 120px; object-fit: cover; border-radius: 8px; margin-bottom: 2px; }
+      .row-thumb { width: 26px; height: 26px; object-fit: cover; border-radius: 5px; vertical-align: middle; margin-left: 6px; }
       .inv-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
       .inv-card-head .cell-strong { font-size: 15px; }
       .inv-card-loc { font-size: 12.5px; color: var(--ink-soft); display: flex; align-items: center; gap: 4px; }
       .inv-card-balance { font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 700; margin-top: 6px; }
       .inv-card-balance-unit { font-family: 'Tajawal'; font-size: 12px; font-weight: 400; color: var(--ink-soft); }
+      .inv-card-box-btn { margin-top: 4px; width: 100%; justify-content: center; }
 
       /* بطاقة "كتاب" — خلفية بلون جلدي/خشبي تحاكي غلاف كتاب بدل البطاقة
          العادية، تُطبّق تلقائياً على أي صنف من مجموعة كتب/مكتبة أو باسم
@@ -8322,6 +8608,58 @@ function FontStyles() {
         .main-col { margin: 0 !important; }
         .panel, .ledger-table, .barcode-grid { box-shadow: none !important; border: 1px solid #999 !important; }
         .page { padding: 0 !important; }
+      }
+
+      /* ---------- طباعة استكرات (ملصقات صغيرة للباركود فقط) ---------- */
+      /* يفعَّل فقط أثناء الطباعة عبر كلاس body.printing-stickers، ولا يؤثر
+         إطلاقاً على العرض العادي في الشاشة */
+      @media print {
+        body.printing-stickers .page-head,
+        body.printing-stickers .filter-chips,
+        body.printing-stickers .cat-list-panel,
+        body.printing-stickers .barcode-name,
+        body.printing-stickers .barcode-linked-badge,
+        body.printing-stickers .barcode-section-tag,
+        body.printing-stickers .barcode-thumb {
+          display: none !important;
+        }
+        body.printing-stickers .page { padding: 0 !important; margin: 0 !important; }
+        body.printing-stickers .panel {
+          padding: 0 !important; margin: 0 !important; border: none !important; box-shadow: none !important;
+        }
+        body.printing-stickers .barcode-grid {
+          display: grid !important;
+          grid-template-columns: repeat(auto-fill, minmax(38mm, 1fr)) !important;
+          gap: 2mm !important;
+          padding: 0 !important;
+        }
+        body.printing-stickers .barcode-card {
+          border: none !important;
+          padding: 1mm !important;
+          gap: 0.5mm !important;
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        body.printing-stickers .real-barcode {
+          max-width: 34mm !important;
+          height: 12mm !important;
+        }
+        body.printing-stickers .barcode-number {
+          font-size: 8px !important;
+          margin-top: 0.5mm !important;
+        }
+      }
+
+      /* ---------- رفع صورة المنتج (اختياري) ---------- */
+      .image-upload-field { display: flex; flex-direction: column; gap: 6px; }
+      .image-upload-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .image-upload-preview { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .image-upload-preview img {
+        width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line);
+      }
+      .image-upload-preview-actions { display: flex; gap: 6px; }
+      .barcode-thumb {
+        width: 100%; max-width: 90px; height: 60px; object-fit: cover; border-radius: 6px; margin-bottom: 2px;
       }
 
       /* ---------- تقرير الطباعة/PDF (تصميم مستند مستقل عن واجهة الموقع) ---------- */
