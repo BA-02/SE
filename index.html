@@ -2288,6 +2288,7 @@ async function fileToCompressedDataURL(file, maxDim = 640, quality = 0.72) {
 
 function ImageUploadField({ value, onChange }) {
   const [busy, setBusy] = useState(false);
+  const [phonePairOpen, setPhonePairOpen] = useState(false);
   const galleryRef = React.useRef(null);
   const cameraRef = React.useRef(null);
 
@@ -2318,6 +2319,12 @@ function ImageUploadField({ value, onChange }) {
             <button type="button" className="btn-ghost" onClick={() => cameraRef.current?.click()}>
               <Camera size={14} /> تصوير
             </button>
+            {/* أجهزة اللابتوب/الكمبيوتر عادة بدون كاميرا مناسبة — هذا الزر
+                يعرض باركود QR يفتح صفحة تصوير على الجوال، وتصل الصورة هنا
+                تلقائياً فور التقاطها (بدون رفع/تنزيل يدوي). */}
+            <button type="button" className="btn-ghost" onClick={() => setPhonePairOpen(true)}>
+              <Smartphone size={14} /> التصوير الآن
+            </button>
             <button type="button" className="btn-ghost" onClick={() => onChange("")}>
               <X size={14} /> إزالة
             </button>
@@ -2334,10 +2341,22 @@ function ImageUploadField({ value, onChange }) {
           <button type="button" className="btn-ghost" onClick={() => cameraRef.current?.click()} disabled={busy}>
             <Camera size={15} /> {busy ? "جارٍ التحميل…" : "التقط صورة"}
           </button>
+          {/* على جهاز لابتوب/كمبيوتر بلا كاميرا: اضغط هنا يظهر باركود QR،
+              امسحه بجوالك ليفتح صفحة تصوير، والتقط الصورة من هناك — تنضاف
+              الصورة هنا تلقائياً خلال ثوانٍ دون أي خطوة يدوية إضافية. */}
+          <button type="button" className="btn-ghost" onClick={() => setPhonePairOpen(true)} disabled={busy}>
+            <Smartphone size={15} /> التصوير الآن (عبر الجوال)
+          </button>
         </div>
       )}
       <input ref={galleryRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFile} />
       <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFile} />
+      {phonePairOpen && (
+        <PhotoCapturePairing
+          onCapture={(img) => { onChange(img); setPhonePairOpen(false); }}
+          onClose={() => setPhonePairOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -3804,6 +3823,10 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
   // "all" = كل الباركودات · "unassigned" = بدون قسم · وإلا معرّف القسم نفسه
   const [sectionFilter, setSectionFilter] = useState("all");
+  // فلتر "المضافة": "all" = الكل · "added" = مضافة كصنف بقائمة الأغراض فقط ·
+  // "unadded" = غير مضافة فقط — يعمل مع أي فلتر قسم مختار، ويبقى محفوظاً
+  // بنفس الشكل بكل الأقسام (لأن صفحة الباركودات موحّدة لكل الأقسام)
+  const [addedFilter, setAddedFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
   const [flashIdx, setFlashIdx] = useState(null);
@@ -3910,6 +3933,11 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
       if (sectionFilter === "unassigned") return !b.branch;
       return b.branch === sectionFilter;
     })
+    .filter(({ b }) => {
+      if (addedFilter === "added") return linkedCodes.has(b.number);
+      if (addedFilter === "unadded") return !linkedCodes.has(b.number);
+      return true;
+    })
     .filter(({ b }) => fuzzyIncludes(b.name + " " + b.number + " " + sectionName(b.branch), query));
 
   const pageTitle = sectionFilter === "all"
@@ -3960,6 +3988,18 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
           </button>
         </div>
       )}
+
+      <div className="filter-chips">
+        <button className={`chip ${addedFilter === "all" ? "chip-active" : ""}`} onClick={() => setAddedFilter("all")}>
+          كل الباركودات
+        </button>
+        <button className={`chip ${addedFilter === "added" ? "chip-active" : ""}`} onClick={() => setAddedFilter("added")}>
+          <PackageCheck size={13} style={{ marginInlineEnd: 4, verticalAlign: "-2px" }} /> المضافة فقط
+        </button>
+        <button className={`chip ${addedFilter === "unadded" ? "chip-active" : ""}`} onClick={() => setAddedFilter("unadded")}>
+          غير المضافة فقط
+        </button>
+      </div>
 
       <div className="panel">
         {visible.length === 0 ? (
@@ -6894,6 +6934,307 @@ function ScannerMobilePage({ initialCode }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  تصوير عبر الجوال (نفس فكرة ربط ماسح الباركود أعلاه بالضبط، لكن     */
+/*  لالتقاط صورة بدل قراءة باركود): اللابتوب يولّد رمز جلسة من 4 أرقام */
+/*  ويعرض باركود QR يفتح صفحة تصوير مستقلة على الجوال (index.html?    */
+/*  photo=1&code=XXXX)، الجوال يلتقط الصورة ويكتبها بنفس وثيقة الجلسة  */
+/*  في Supabase، واللابتوب يستمع لحظياً (window.subscribeStorage)      */
+/*  ويرفق الصورة تلقائياً بحقل الصورة المفتوح — دون أي رفع/تنزيل يدوي. */
+/* ------------------------------------------------------------------ */
+
+const PHOTO_SESSION_PREFIX = "photo_session_";
+const PHOTO_SESSION_TTL_MS = 30 * 60 * 1000; // نصف ساعة كافية لالتقاط صورة وإرسالها
+
+function genPhotoSessionCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+function photoSessionKey(code) {
+  return PHOTO_SESSION_PREFIX + String(code || "").trim();
+}
+
+function photoMobileUrl(code) {
+  try {
+    const url = new URL(window.location.href);
+    url.hash = "";
+    url.search = "";
+    url.searchParams.set("photo", "1");
+    url.searchParams.set("code", code);
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+/* نافذة "تصوير عبر الجوال" — تُفتح من زر داخل حقل الصورة (ImageUploadField)
+   على اللابتوب: تولّد رمز جلسة، تعرض باركود QR، وتستلم الصورة تلقائياً
+   فور التقاطها من الجوال دون أي تدخّل إضافي على اللابتوب. */
+function PhotoCapturePairing({ onCapture, onClose }) {
+  const [session, setSession] = useState(null); // { code, status, photo, photoId, createdAt }
+  const [copied, setCopied] = useState(false);
+  const unsubRef = React.useRef(null);
+  const sessionCodeRef = React.useRef(null);
+  const lastPhotoIdRef = React.useRef(0);
+
+  const stopListening = () => {
+    if (unsubRef.current) { try { unsubRef.current(); } catch {} unsubRef.current = null; }
+  };
+
+  const listen = (code) => {
+    stopListening();
+    lastPhotoIdRef.current = 0;
+    unsubRef.current = window.subscribeStorage
+      ? window.subscribeStorage(photoSessionKey(code), (rawValue) => {
+          let parsed;
+          try { parsed = JSON.parse(rawValue); } catch { return; }
+          if (!parsed) return;
+          setSession((s) => (s ? { ...s, ...parsed } : parsed));
+          if (parsed.photo && parsed.photoId && parsed.photoId > lastPhotoIdRef.current) {
+            lastPhotoIdRef.current = parsed.photoId;
+            stopListening();
+            try { window.storage?.delete(photoSessionKey(code)); } catch {}
+            onCapture(parsed.photo);
+          }
+        })
+      : null;
+  };
+
+  const startSession = async () => {
+    const code = genPhotoSessionCode();
+    sessionCodeRef.current = code;
+    const value = { code, createdAt: Date.now(), status: "waiting", photo: null, photoId: 0, phoneConnectedAt: null };
+    setSession(value);
+    try { await window.storage?.set(photoSessionKey(code), JSON.stringify(value)); } catch {}
+    listen(code);
+  };
+
+  const regenerate = async () => {
+    const oldCode = session?.code;
+    stopListening();
+    if (oldCode) { try { await window.storage?.delete(photoSessionKey(oldCode)); } catch {} }
+    setSession(null);
+    await startSession();
+  };
+
+  useEffect(() => {
+    startSession();
+    return () => {
+      stopListening();
+      const code = sessionCodeRef.current;
+      if (code) { try { window.storage?.delete(photoSessionKey(code)); } catch {} }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const connected = session?.status === "connected";
+  const link = session?.code ? photoMobileUrl(session.code) : "";
+
+  const copyLink = async () => {
+    if (!link) return;
+    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
+  };
+
+  return (
+    <Modal
+      title={<><Camera size={16} style={{ verticalAlign: "-2px", marginLeft: 6 }} /> تصوير عبر الجوال</>}
+      onClose={onClose}
+    >
+      <div className="scanner-pair-body">
+        <div className={`scanner-status ${connected ? "scanner-status-on" : "scanner-status-wait"}`}>
+          {connected ? <><Wifi size={14} /> الجوال متصل — بانتظار الصورة… 🟢</> : <><WifiOff size={14} /> جاري الانتظار…</>}
+        </div>
+
+        {link && (
+          <div className="scanner-qr-wrap">
+            <img
+              className="scanner-qr-img"
+              alt="باركود فتح صفحة التصوير على الجوال"
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(link)}`}
+            />
+          </div>
+        )}
+
+        <p className="scanner-hint">
+          صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) ليفتح صفحة تصوير خاصة على جوالك، التقط الصورة من هناك وستُرفق هنا تلقائياً خلال ثوانٍ
+        </p>
+
+        <details className="scanner-manual-fallback">
+          <summary>الباركود ما اشتغل؟ افتح الرابط يدوياً</summary>
+          <div className="scanner-code-display">{session?.code ? session.code.split("").join(" ") : "‑ ‑ ‑ ‑"}</div>
+          <div className="scanner-link-row">
+            <input className="input scanner-link-input mono" readOnly value={link} onFocus={(e) => e.target.select()} />
+            <button type="button" className="icon-btn" title="نسخ الرابط" onClick={copyLink}>
+              {copied ? <Check size={16} /> : <Copy size={16} />}
+            </button>
+          </div>
+        </details>
+
+        <div className="scanner-actions">
+          <button type="button" className="btn-ghost" onClick={regenerate}><RefreshCw size={14} /> رمز جديد</button>
+          <button type="button" className="btn-danger" onClick={onClose}><X size={14} /> إلغاء</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  صفحة الجوال المستقلة: تفتح عبر رابط index.html?photo=1&code=XXXX  */
+/* ------------------------------------------------------------------ */
+function PhotoCaptureMobilePage({ initialCode }) {
+  const [step, setStep] = useState("code"); // code | connecting | ready | sending | sent
+  const [code, setCode] = useState(initialCode || "");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [preview, setPreview] = useState("");
+  const [sentCount, setSentCount] = useState(0);
+  const galleryRef = React.useRef(null);
+  const cameraRef = React.useRef(null);
+  const photoCounterRef = React.useRef(0);
+
+  const connect = async (rawCode) => {
+    const clean = String(rawCode || "").trim();
+    if (clean.length !== 4) { setErrorMsg("أدخل رمزاً من 4 أرقام"); return; }
+    setErrorMsg("");
+    setStep("connecting");
+    try {
+      const res = await window.storage?.get(photoSessionKey(clean));
+      const parsed = res?.value ? JSON.parse(res.value) : null;
+      if (!parsed || Date.now() - (parsed.createdAt || 0) > PHOTO_SESSION_TTL_MS) {
+        setStep("code");
+        setErrorMsg("الرمز غير صحيح أو انتهت صلاحية الجلسة — تأكد من الرمز الظاهر على اللابتوب");
+        return;
+      }
+      setCode(clean);
+      await window.storage?.set(
+        photoSessionKey(clean),
+        JSON.stringify({ ...parsed, status: "connected", phoneConnectedAt: Date.now() })
+      );
+      setStep("ready");
+    } catch {
+      setStep("code");
+      setErrorMsg("تعذّر الاتصال — تأكد من اتصال الجوال بالإنترنت وحاول مجدداً");
+    }
+  };
+
+  const handleFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // يسمح بالتقاط نفس الصورة مرة ثانية لاحقاً لو احتاج
+    if (!file) return;
+    setErrorMsg("");
+    setStep("sending");
+    try {
+      const dataUrl = await fileToCompressedDataURL(file);
+      setPreview(dataUrl);
+      photoCounterRef.current += 1;
+      await window.storage?.set(
+        photoSessionKey(code),
+        JSON.stringify({ code, status: "connected", photo: dataUrl, photoId: photoCounterRef.current, lastSentAt: Date.now() })
+      );
+      setSentCount((n) => n + 1);
+      hapticPulse("success");
+      playBeep("success");
+      setStep("sent");
+    } catch {
+      hapticPulse("error");
+      setErrorMsg("تعذّر إرسال الصورة، حاول مرة أخرى");
+      setStep("ready");
+    }
+  };
+
+  useEffect(() => {
+    if (initialCode && initialCode.length === 4) connect(initialCode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const disconnect = () => {
+    setStep("code");
+    setPreview("");
+    setSentCount(0);
+  };
+
+  return (
+    <div className="scanner-mobile-shell">
+      <FontStyles />
+      <style>{`
+        .photo-mobile-preview { width: 100%; max-width: 240px; border-radius: 14px; overflow: hidden; border: 2px solid #46586A; }
+        .photo-mobile-preview img { width: 100%; display: block; }
+        .photo-mobile-big-btn {
+          width: 92px; height: 92px; border-radius: 50%; background: #C9BA96; color: #23303A;
+          border: none; display: flex; align-items: center; justify-content: center; cursor: pointer;
+        }
+        .photo-mobile-big-btn:disabled { opacity: 0.6; }
+        .photo-mobile-big-btn:active { transform: scale(0.95); }
+        .photo-mobile-gallery-btn {
+          background: transparent; border: 1px solid #6B7A87; color: #F3EEDD; padding: 10px 16px;
+          border-radius: 10px; font-size: 13.5px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+        }
+      `}</style>
+
+      <div className="scanner-mobile-title"><Camera size={20} /> تصوير عبر الجوال</div>
+
+      {step === "code" && (
+        <div className="scanner-mobile-card">
+          <p className="scanner-mobile-hint">أدخل الرمز المكوّن من 4 أرقام الظاهر على شاشة اللابتوب</p>
+          <input
+            className="scanner-mobile-code-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={4}
+            autoFocus
+            placeholder="0000"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            onKeyDown={(e) => { if (e.key === "Enter") connect(code); }}
+          />
+          {errorMsg && <div className="scanner-mobile-error"><TriangleAlert size={13} style={{ verticalAlign: "-2px" }} /> {errorMsg}</div>}
+          <button className="scanner-mobile-btn" onClick={() => connect(code)}><Wifi size={17} /> ربط بالجهاز</button>
+        </div>
+      )}
+
+      {step === "connecting" && (
+        <div className="scanner-mobile-card">
+          <p className="scanner-mobile-hint">جاري الاتصال…</p>
+        </div>
+      )}
+
+      {(step === "ready" || step === "sending" || step === "sent") && (
+        <div className="scanner-mobile-card">
+          <div className="scanner-mobile-status"><Wifi size={15} /> متصل بالكمبيوتر 🟢</div>
+
+          {preview && (
+            <div className="photo-mobile-preview"><img src={preview} alt="آخر صورة أُرسلت" /></div>
+          )}
+
+          {step === "sent" && (
+            <div className="scanner-mobile-last"><PackageCheck size={13} style={{ verticalAlign: "-2px" }} /> تم الإرسال إلى اللابتوب ✓ ({sentCount})</div>
+          )}
+          {errorMsg && <div className="scanner-mobile-error"><TriangleAlert size={13} style={{ verticalAlign: "-2px" }} /> {errorMsg}</div>}
+
+          <button
+            className="photo-mobile-big-btn"
+            disabled={step === "sending"}
+            onClick={() => cameraRef.current?.click()}
+            title="التقط صورة"
+          >
+            <Camera size={34} />
+          </button>
+          <p className="scanner-mobile-hint">{step === "sending" ? "جاري الإرسال…" : "اضغط لالتقاط صورة وإرسالها فوراً"}</p>
+
+          <button type="button" className="photo-mobile-gallery-btn" onClick={() => galleryRef.current?.click()} disabled={step === "sending"}>
+            <FolderOpen size={15} /> اختيار من المعرض بدلاً من ذلك
+          </button>
+
+          <button className="scanner-mobile-disconnect" onClick={disconnect}>قطع الاتصال / رمز جديد</button>
+        </div>
+      )}
+
+      <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFile} />
+      <input ref={galleryRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFile} />
+    </div>
+  );
+}
+
 function App() {
   const [page, setPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
@@ -7472,6 +7813,7 @@ function PrintableReport({ job, data, inventory }) {
   }
 
   const groupName = (id) => data.itemGroups.find((g) => g.id === id)?.name || "بدون مجموعة";
+  const branchName = (id) => (data.branches || []).find((b) => b.id === id)?.name || "—";
 
   const TITLES = {
     dashboard: "تقرير ملخص المستودع",
@@ -7528,12 +7870,13 @@ function PrintableReport({ job, data, inventory }) {
 
       {type === "inventory" && (
         <table className="print-table">
-          <thead><tr><th>الكود</th><th>الصنف</th><th>المجموعة</th><th>الموقع</th><th>الداخل</th><th>الخارج</th><th>الكمية</th><th>الحالة</th></tr></thead>
+          <thead><tr><th>الكود</th><th>الصنف</th><th>القسم</th><th>المجموعة</th><th>الموقع</th><th>الداخل</th><th>الخارج</th><th>الكمية</th><th>الحالة</th></tr></thead>
           <tbody>
             {inventory.map((i) => (
               <tr key={i.code}>
                 <td>{i.code}</td>
                 <td>{i.name}</td>
+                <td>{branchName(i.branch)}</td>
                 <td>{groupName(i.group)}</td>
                 <td>{i.category || "—"}</td>
                 <td>{i.inQty}</td>
@@ -8748,6 +9091,9 @@ function RootRouter() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("scanner") === "1") {
     return <ScannerMobilePage initialCode={params.get("code") || ""} />;
+  }
+  if (params.get("photo") === "1") {
+    return <PhotoCaptureMobilePage initialCode={params.get("code") || ""} />;
   }
   return <App />;
 }
