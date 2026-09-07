@@ -6974,7 +6974,7 @@ function ScannerMobilePage({ initialCode }) {
 /* ------------------------------------------------------------------ */
 
 const PHOTO_SESSION_PREFIX = "photo_session_";
-const PHOTO_SESSION_TTL_MS = 30 * 60 * 1000; // نصف ساعة كافية لالتقاط صورة وإرسالها
+const PHOTO_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // ساعتان قبل أول اتصال من الجوال بالرمز
 
 function genPhotoSessionCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
@@ -6998,6 +6998,89 @@ function photoMobileUrl(code, mode = "camera") {
   }
 }
 
+/* جلسة ربط تصوير الجوال على مستوى الجلسة الكاملة للموقع (وليس على مستوى
+   نافذة التصوير وحدها): بمجرد أن يمسح المستخدم الباركود ويتصل جواله مرة
+   واحدة، يبقى الجوال مرتبطاً طوال استخدامه للموقع — فلا يحتاج لإعادة مسح
+   الباركود مع كل صنف جديد يريد تصوير صورة له. تُخزَّن حالة الربط في متغيّر
+   خارج React (module-level) حتى تبقى حيّة رغم إغلاق/إعادة فتح نافذة
+   التصوير (unmount)، وتشترك أي نافذة مفتوحة بها عبر useSyncExternalStore. */
+const photoPairing = {
+  session: null, // { code, status, requestId, requestMode, photo, photoId, createdAt, phoneConnectedAt }
+  unsub: null,
+  subscribers: new Set(),
+};
+
+function photoPairingNotify() {
+  photoPairing.subscribers.forEach((fn) => { try { fn(); } catch {} });
+}
+
+function photoPairingListen(code) {
+  if (photoPairing.unsub) { try { photoPairing.unsub(); } catch {} photoPairing.unsub = null; }
+  photoPairing.unsub = window.subscribeStorage
+    ? window.subscribeStorage(photoSessionKey(code), (rawValue) => {
+        let parsed;
+        try { parsed = JSON.parse(rawValue); } catch { return; }
+        if (!parsed) return;
+        photoPairing.session = { ...(photoPairing.session || {}), ...parsed };
+        photoPairingNotify();
+      })
+    : null;
+}
+
+async function photoPairingStart() {
+  const code = genPhotoSessionCode();
+  const value = {
+    code, createdAt: Date.now(), status: "waiting",
+    requestId: 1, requestMode: "camera", photo: null, photoId: 0, phoneConnectedAt: null,
+  };
+  photoPairing.session = value;
+  photoPairingNotify();
+  try { await window.storage?.set(photoSessionKey(code), JSON.stringify(value)); } catch {}
+  photoPairingListen(code);
+}
+
+// تُستدعى عند فتح نافذة التصوير لأي صنف — لو الجوال متصل بالفعل بنفس رمز
+// الجلسة، تكتفي بطلب صورة جديدة (رفع رقم الطلب) بنفس الرمز القائم بدل
+// توليد باركود جديد، فيلتقطها الجوال تلقائياً بمجرد فتح النافذة دون أي
+// إعادة مسح. لو لا توجد جلسة أصلاً تبدأ واحدة جديدة بباركود جديد.
+async function photoPairingRequestCapture(mode) {
+  const session = photoPairing.session;
+  if (!session || !session.code) { await photoPairingStart(); return; }
+  const value = {
+    ...session,
+    requestId: (session.requestId || 0) + 1,
+    requestMode: mode,
+    photo: null,
+  };
+  photoPairing.session = value;
+  photoPairingNotify();
+  try { await window.storage?.set(photoSessionKey(session.code), JSON.stringify(value)); } catch {}
+}
+
+async function photoPairingRegenerate() {
+  const old = photoPairing.session?.code;
+  if (photoPairing.unsub) { try { photoPairing.unsub(); } catch {} photoPairing.unsub = null; }
+  if (old) { try { await window.storage?.delete(photoSessionKey(old)); } catch {} }
+  photoPairing.session = null;
+  photoPairingNotify();
+  await photoPairingStart();
+}
+
+async function photoPairingDisconnect() {
+  const old = photoPairing.session?.code;
+  if (photoPairing.unsub) { try { photoPairing.unsub(); } catch {} photoPairing.unsub = null; }
+  if (old) { try { await window.storage?.delete(photoSessionKey(old)); } catch {} }
+  photoPairing.session = null;
+  photoPairingNotify();
+}
+
+function usePhotoPairingSession() {
+  return React.useSyncExternalStore(
+    (cb) => { photoPairing.subscribers.add(cb); return () => photoPairing.subscribers.delete(cb); },
+    () => photoPairing.session
+  );
+}
+
 /* نافذة "تصوير عبر الجوال" / "رفع من الجوال" — تُفتح من زر داخل حقل الصورة
    (ImageUploadField) على اللابتوب: تولّد رمز جلسة، تعرض باركود QR، وتستلم
    الصورة تلقائياً فور التقاطها/اختيارها من الجوال دون أي تدخّل إضافي على
@@ -7005,61 +7088,32 @@ function photoMobileUrl(code, mode = "camera") {
    "camera" يفتح الكاميرا مباشرة، و"gallery" يفتح معرض الصور مباشرة —
    في الحالتين بدون أي ضغطة إضافية على الجوال نفسه. */
 function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
-  const [session, setSession] = useState(null); // { code, status, photo, photoId, createdAt }
+  // تعتمد على جلسة الربط الدائمة (photoPairing) بدل إنشاء/حذف جلسة خاصة
+  // بها — لو الجوال متصل من قبل تُستخدَم نفس الجلسة تلقائياً دون أي مسح
+  // جديد للباركود، وتبقى الجلسة حيّة حتى بعد إغلاق هذه النافذة.
+  const session = usePhotoPairingSession();
   const [copied, setCopied] = useState(false);
-  const unsubRef = React.useRef(null);
-  const sessionCodeRef = React.useRef(null);
-  const lastPhotoIdRef = React.useRef(0);
-
-  const stopListening = () => {
-    if (unsubRef.current) { try { unsubRef.current(); } catch {} unsubRef.current = null; }
-  };
-
-  const listen = (code) => {
-    stopListening();
-    lastPhotoIdRef.current = 0;
-    unsubRef.current = window.subscribeStorage
-      ? window.subscribeStorage(photoSessionKey(code), (rawValue) => {
-          let parsed;
-          try { parsed = JSON.parse(rawValue); } catch { return; }
-          if (!parsed) return;
-          setSession((s) => (s ? { ...s, ...parsed } : parsed));
-          if (parsed.photo && parsed.photoId && parsed.photoId > lastPhotoIdRef.current) {
-            lastPhotoIdRef.current = parsed.photoId;
-            stopListening();
-            try { window.storage?.delete(photoSessionKey(code)); } catch {}
-            onCapture(parsed.photo);
-          }
-        })
-      : null;
-  };
-
-  const startSession = async () => {
-    const code = genPhotoSessionCode();
-    sessionCodeRef.current = code;
-    const value = { code, createdAt: Date.now(), status: "waiting", photo: null, photoId: 0, phoneConnectedAt: null };
-    setSession(value);
-    try { await window.storage?.set(photoSessionKey(code), JSON.stringify(value)); } catch {}
-    listen(code);
-  };
-
-  const regenerate = async () => {
-    const oldCode = session?.code;
-    stopListening();
-    if (oldCode) { try { await window.storage?.delete(photoSessionKey(oldCode)); } catch {} }
-    setSession(null);
-    await startSession();
-  };
+  const handledPhotoIdRef = React.useRef(session?.photoId || 0);
+  const startedRef = React.useRef(false);
 
   useEffect(() => {
-    startSession();
-    return () => {
-      stopListening();
-      const code = sessionCodeRef.current;
-      if (code) { try { window.storage?.delete(photoSessionKey(code)); } catch {} }
-    };
+    handledPhotoIdRef.current = session?.photoId || 0;
+    if (!startedRef.current) {
+      startedRef.current = true;
+      if (session?.code) photoPairingRequestCapture(mode);
+      else photoPairingStart();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    if (session.photo && session.photoId && session.photoId > handledPhotoIdRef.current) {
+      handledPhotoIdRef.current = session.photoId;
+      onCapture(session.photo);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
 
   const connected = session?.status === "connected";
   const link = session?.code ? photoMobileUrl(session.code, mode) : "";
@@ -7068,6 +7122,9 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
     if (!link) return;
     try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
   };
+
+  const regenerate = async () => { await photoPairingRegenerate(); };
+  const disconnectAll = async () => { await photoPairingDisconnect(); onClose(); };
 
   const isGallery = mode === "gallery";
 
@@ -7085,7 +7142,7 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
           {connected ? <><Wifi size={14} /> الجوال متصل — بانتظار الصورة… 🟢</> : <><WifiOff size={14} /> جاري الانتظار…</>}
         </div>
 
-        {link && (
+        {!connected && link && (
           <div className="scanner-qr-wrap">
             <img
               className="scanner-qr-img"
@@ -7096,9 +7153,11 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
         )}
 
         <p className="scanner-hint">
-          {isGallery
-            ? "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — سيفتح معرض صور جوالك مباشرة لاختيار صورة، وستُرفق هنا تلقائياً خلال ثوانٍ"
-            : "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — ستفتح كاميرا جوالك مباشرة للالتقاط، وستُرفق الصورة هنا تلقائياً خلال ثوانٍ"}
+          {connected
+            ? "جوالك مرتبط بالفعل — ستفتح الكاميرا/المعرض على جوالك تلقائياً خلال ثوانٍ، وستُرفق الصورة هنا مباشرة. سيبقى الجوال مرتبطاً لبقية الجلسة، فلن تحتاج لإعادة مسح الباركود عند تصوير صور لأصناف أخرى."
+            : isGallery
+              ? "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — سيفتح معرض صور جوالك مباشرة لاختيار صورة، وستُرفق هنا تلقائياً خلال ثوانٍ. وسيبقى جوالك مرتبطاً بعدها لبقية الجلسة دون الحاجة لإعادة المسح."
+              : "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — ستفتح كاميرا جوالك مباشرة للالتقاط، وستُرفق الصورة هنا تلقائياً خلال ثوانٍ. وسيبقى جوالك مرتبطاً بعدها لبقية الجلسة دون الحاجة لإعادة المسح."}
         </p>
 
         <details className="scanner-manual-fallback">
@@ -7113,8 +7172,13 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
         </details>
 
         <div className="scanner-actions">
-          <button type="button" className="btn-ghost" onClick={regenerate}><RefreshCw size={14} /> رمز جديد</button>
-          <button type="button" className="btn-danger" onClick={onClose}><X size={14} /> إلغاء</button>
+          {!connected && (
+            <button type="button" className="btn-ghost" onClick={regenerate}><RefreshCw size={14} /> رمز جديد</button>
+          )}
+          {connected && (
+            <button type="button" className="btn-ghost" onClick={disconnectAll}><WifiOff size={14} /> قطع الاتصال نهائياً</button>
+          )}
+          <button type="button" className="btn-danger" onClick={onClose}><X size={14} /> إغلاق</button>
         </div>
       </div>
     </Modal>
@@ -7130,13 +7194,41 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
   const [errorMsg, setErrorMsg] = useState("");
   const [preview, setPreview] = useState("");
   const [sentCount, setSentCount] = useState(0);
-  const mode = initialMode === "gallery" ? "gallery" : "camera";
+  const [mode, setMode] = useState(initialMode === "gallery" ? "gallery" : "camera");
   const galleryRef = React.useRef(null);
   const cameraRef = React.useRef(null);
   const photoCounterRef = React.useRef(0);
   // يفتح الكاميرا (أو المعرض حسب الوضع) تلقائياً فور الاتصال، بدون أي
-  // ضغطة إضافية من المستخدم على الجوال — مرة واحدة فقط عند أول اتصال
+  // ضغطة إضافية من المستخدم على الجوال — يُعاد ضبطه مع كل طلب جديد
   const autoTriggeredRef = React.useRef(false);
+  // يبقى مستمعاً لجلسة الربط طوال الوقت بعد الاتصال (وليس فقط لحظة الربط)
+  // حتى يفتح الكاميرا/المعرض تلقائياً من جديد فور طلب اللابتوب صورة صنف
+  // آخر — دون الحاجة لإعادة مسح الباركود مطلقاً طوال هذه الجلسة
+  const lastRequestIdRef = React.useRef(0);
+  const unsubRef = React.useRef(null);
+
+  const stopListening = () => {
+    if (unsubRef.current) { try { unsubRef.current(); } catch {} unsubRef.current = null; }
+  };
+
+  const listen = (clean) => {
+    stopListening();
+    unsubRef.current = window.subscribeStorage
+      ? window.subscribeStorage(photoSessionKey(clean), (rawValue) => {
+          let parsed;
+          try { parsed = JSON.parse(rawValue); } catch { return; }
+          if (!parsed) return;
+          if (parsed.requestId && parsed.requestId > lastRequestIdRef.current) {
+            lastRequestIdRef.current = parsed.requestId;
+            setMode(parsed.requestMode === "gallery" ? "gallery" : "camera");
+            setPreview("");
+            setErrorMsg("");
+            autoTriggeredRef.current = false;
+            setStep("ready");
+          }
+        })
+      : null;
+  };
 
   const connect = async (rawCode) => {
     const clean = String(rawCode || "").trim();
@@ -7152,10 +7244,13 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
         return;
       }
       setCode(clean);
+      lastRequestIdRef.current = parsed.requestId || 0;
+      setMode(parsed.requestMode === "gallery" ? "gallery" : "camera");
       await window.storage?.set(
         photoSessionKey(clean),
         JSON.stringify({ ...parsed, status: "connected", phoneConnectedAt: Date.now() })
       );
+      listen(clean);
       setStep("ready");
     } catch {
       setStep("code");
@@ -7175,7 +7270,11 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
       photoCounterRef.current += 1;
       await window.storage?.set(
         photoSessionKey(code),
-        JSON.stringify({ code, status: "connected", photo: dataUrl, photoId: photoCounterRef.current, lastSentAt: Date.now() })
+        JSON.stringify({
+          code, status: "connected",
+          requestId: lastRequestIdRef.current, requestMode: mode,
+          photo: dataUrl, photoId: photoCounterRef.current, lastSentAt: Date.now(),
+        })
       );
       setSentCount((n) => n + 1);
       hapticPulse("success");
@@ -7190,11 +7289,13 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
 
   useEffect(() => {
     if (initialCode && initialCode.length === 4) connect(initialCode);
+    return () => stopListening();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // فور الوصول لخطوة "جاهز" (متصل باللابتوب) نفتح الكاميرا أو المعرض
-  // تلقائياً حسب الوضع المطلوب — دون انتظار ضغطة من المستخدم
+  // فور الوصول لخطوة "جاهز" (متصل باللابتوب، أو وصل طلب صورة جديد لصنف
+  // آخر) نفتح الكاميرا أو المعرض تلقائياً حسب الوضع المطلوب — دون انتظار
+  // ضغطة من المستخدم
   useEffect(() => {
     if (step !== "ready" || autoTriggeredRef.current) return;
     autoTriggeredRef.current = true;
@@ -7205,8 +7306,14 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
     return () => clearTimeout(t);
   }, [step, mode]);
 
-  const disconnect = () => {
+  // قطع الاتصال نهائياً — ينهي جلسة الربط بالكامل ويحتاج المستخدم لمسح
+  // باركود جديد بعدها؛ ما يحدث تلقائياً عند مجرد إغلاق صفحة الجوال أو
+  // التنقل بين الأصناف على اللابتوب (تبقى الجلسة مرتبطة طوال ذلك)
+  const disconnect = async () => {
+    stopListening();
+    if (code) { try { await window.storage?.delete(photoSessionKey(code)); } catch {} }
     setStep("code");
+    setCode("");
     setPreview("");
     setSentCount(0);
     autoTriggeredRef.current = false;
@@ -7283,9 +7390,11 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
           <p className="scanner-mobile-hint">
             {step === "sending"
               ? "جاري الإرسال…"
-              : mode === "gallery"
-                ? "اضغط لاختيار صورة من المعرض وإرسالها فوراً"
-                : "اضغط لالتقاط صورة وإرسالها فوراً"}
+              : step === "sent"
+                ? "الجوال ما زال مرتبطاً — سيفتح تلقائياً فور طلب صورة صنف آخر من اللابتوب، أو اضغط للالتقاط الآن"
+                : mode === "gallery"
+                  ? "اضغط لاختيار صورة من المعرض وإرسالها فوراً"
+                  : "اضغط لالتقاط صورة وإرسالها فوراً"}
           </p>
 
           {mode === "gallery" ? (
@@ -7298,7 +7407,7 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
             </button>
           )}
 
-          <button className="scanner-mobile-disconnect" onClick={disconnect}>قطع الاتصال / رمز جديد</button>
+          <button className="scanner-mobile-disconnect" onClick={disconnect}>قطع الاتصال نهائياً</button>
         </div>
       )}
 
@@ -16152,7 +16261,7 @@ function ScannerMobilePage({ initialCode }) {
 /* ------------------------------------------------------------------ */
 
 const PHOTO_SESSION_PREFIX = "photo_session_";
-const PHOTO_SESSION_TTL_MS = 30 * 60 * 1000; // نصف ساعة كافية لالتقاط صورة وإرسالها
+const PHOTO_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // ساعتان قبل أول اتصال من الجوال بالرمز
 
 function genPhotoSessionCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
@@ -16176,6 +16285,89 @@ function photoMobileUrl(code, mode = "camera") {
   }
 }
 
+/* جلسة ربط تصوير الجوال على مستوى الجلسة الكاملة للموقع (وليس على مستوى
+   نافذة التصوير وحدها): بمجرد أن يمسح المستخدم الباركود ويتصل جواله مرة
+   واحدة، يبقى الجوال مرتبطاً طوال استخدامه للموقع — فلا يحتاج لإعادة مسح
+   الباركود مع كل صنف جديد يريد تصوير صورة له. تُخزَّن حالة الربط في متغيّر
+   خارج React (module-level) حتى تبقى حيّة رغم إغلاق/إعادة فتح نافذة
+   التصوير (unmount)، وتشترك أي نافذة مفتوحة بها عبر useSyncExternalStore. */
+const photoPairing = {
+  session: null, // { code, status, requestId, requestMode, photo, photoId, createdAt, phoneConnectedAt }
+  unsub: null,
+  subscribers: new Set(),
+};
+
+function photoPairingNotify() {
+  photoPairing.subscribers.forEach((fn) => { try { fn(); } catch {} });
+}
+
+function photoPairingListen(code) {
+  if (photoPairing.unsub) { try { photoPairing.unsub(); } catch {} photoPairing.unsub = null; }
+  photoPairing.unsub = window.subscribeStorage
+    ? window.subscribeStorage(photoSessionKey(code), (rawValue) => {
+        let parsed;
+        try { parsed = JSON.parse(rawValue); } catch { return; }
+        if (!parsed) return;
+        photoPairing.session = { ...(photoPairing.session || {}), ...parsed };
+        photoPairingNotify();
+      })
+    : null;
+}
+
+async function photoPairingStart() {
+  const code = genPhotoSessionCode();
+  const value = {
+    code, createdAt: Date.now(), status: "waiting",
+    requestId: 1, requestMode: "camera", photo: null, photoId: 0, phoneConnectedAt: null,
+  };
+  photoPairing.session = value;
+  photoPairingNotify();
+  try { await window.storage?.set(photoSessionKey(code), JSON.stringify(value)); } catch {}
+  photoPairingListen(code);
+}
+
+// تُستدعى عند فتح نافذة التصوير لأي صنف — لو الجوال متصل بالفعل بنفس رمز
+// الجلسة، تكتفي بطلب صورة جديدة (رفع رقم الطلب) بنفس الرمز القائم بدل
+// توليد باركود جديد، فيلتقطها الجوال تلقائياً بمجرد فتح النافذة دون أي
+// إعادة مسح. لو لا توجد جلسة أصلاً تبدأ واحدة جديدة بباركود جديد.
+async function photoPairingRequestCapture(mode) {
+  const session = photoPairing.session;
+  if (!session || !session.code) { await photoPairingStart(); return; }
+  const value = {
+    ...session,
+    requestId: (session.requestId || 0) + 1,
+    requestMode: mode,
+    photo: null,
+  };
+  photoPairing.session = value;
+  photoPairingNotify();
+  try { await window.storage?.set(photoSessionKey(session.code), JSON.stringify(value)); } catch {}
+}
+
+async function photoPairingRegenerate() {
+  const old = photoPairing.session?.code;
+  if (photoPairing.unsub) { try { photoPairing.unsub(); } catch {} photoPairing.unsub = null; }
+  if (old) { try { await window.storage?.delete(photoSessionKey(old)); } catch {} }
+  photoPairing.session = null;
+  photoPairingNotify();
+  await photoPairingStart();
+}
+
+async function photoPairingDisconnect() {
+  const old = photoPairing.session?.code;
+  if (photoPairing.unsub) { try { photoPairing.unsub(); } catch {} photoPairing.unsub = null; }
+  if (old) { try { await window.storage?.delete(photoSessionKey(old)); } catch {} }
+  photoPairing.session = null;
+  photoPairingNotify();
+}
+
+function usePhotoPairingSession() {
+  return React.useSyncExternalStore(
+    (cb) => { photoPairing.subscribers.add(cb); return () => photoPairing.subscribers.delete(cb); },
+    () => photoPairing.session
+  );
+}
+
 /* نافذة "تصوير عبر الجوال" / "رفع من الجوال" — تُفتح من زر داخل حقل الصورة
    (ImageUploadField) على اللابتوب: تولّد رمز جلسة، تعرض باركود QR، وتستلم
    الصورة تلقائياً فور التقاطها/اختيارها من الجوال دون أي تدخّل إضافي على
@@ -16183,61 +16375,32 @@ function photoMobileUrl(code, mode = "camera") {
    "camera" يفتح الكاميرا مباشرة، و"gallery" يفتح معرض الصور مباشرة —
    في الحالتين بدون أي ضغطة إضافية على الجوال نفسه. */
 function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
-  const [session, setSession] = useState(null); // { code, status, photo, photoId, createdAt }
+  // تعتمد على جلسة الربط الدائمة (photoPairing) بدل إنشاء/حذف جلسة خاصة
+  // بها — لو الجوال متصل من قبل تُستخدَم نفس الجلسة تلقائياً دون أي مسح
+  // جديد للباركود، وتبقى الجلسة حيّة حتى بعد إغلاق هذه النافذة.
+  const session = usePhotoPairingSession();
   const [copied, setCopied] = useState(false);
-  const unsubRef = React.useRef(null);
-  const sessionCodeRef = React.useRef(null);
-  const lastPhotoIdRef = React.useRef(0);
-
-  const stopListening = () => {
-    if (unsubRef.current) { try { unsubRef.current(); } catch {} unsubRef.current = null; }
-  };
-
-  const listen = (code) => {
-    stopListening();
-    lastPhotoIdRef.current = 0;
-    unsubRef.current = window.subscribeStorage
-      ? window.subscribeStorage(photoSessionKey(code), (rawValue) => {
-          let parsed;
-          try { parsed = JSON.parse(rawValue); } catch { return; }
-          if (!parsed) return;
-          setSession((s) => (s ? { ...s, ...parsed } : parsed));
-          if (parsed.photo && parsed.photoId && parsed.photoId > lastPhotoIdRef.current) {
-            lastPhotoIdRef.current = parsed.photoId;
-            stopListening();
-            try { window.storage?.delete(photoSessionKey(code)); } catch {}
-            onCapture(parsed.photo);
-          }
-        })
-      : null;
-  };
-
-  const startSession = async () => {
-    const code = genPhotoSessionCode();
-    sessionCodeRef.current = code;
-    const value = { code, createdAt: Date.now(), status: "waiting", photo: null, photoId: 0, phoneConnectedAt: null };
-    setSession(value);
-    try { await window.storage?.set(photoSessionKey(code), JSON.stringify(value)); } catch {}
-    listen(code);
-  };
-
-  const regenerate = async () => {
-    const oldCode = session?.code;
-    stopListening();
-    if (oldCode) { try { await window.storage?.delete(photoSessionKey(oldCode)); } catch {} }
-    setSession(null);
-    await startSession();
-  };
+  const handledPhotoIdRef = React.useRef(session?.photoId || 0);
+  const startedRef = React.useRef(false);
 
   useEffect(() => {
-    startSession();
-    return () => {
-      stopListening();
-      const code = sessionCodeRef.current;
-      if (code) { try { window.storage?.delete(photoSessionKey(code)); } catch {} }
-    };
+    handledPhotoIdRef.current = session?.photoId || 0;
+    if (!startedRef.current) {
+      startedRef.current = true;
+      if (session?.code) photoPairingRequestCapture(mode);
+      else photoPairingStart();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    if (session.photo && session.photoId && session.photoId > handledPhotoIdRef.current) {
+      handledPhotoIdRef.current = session.photoId;
+      onCapture(session.photo);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
 
   const connected = session?.status === "connected";
   const link = session?.code ? photoMobileUrl(session.code, mode) : "";
@@ -16246,6 +16409,9 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
     if (!link) return;
     try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
   };
+
+  const regenerate = async () => { await photoPairingRegenerate(); };
+  const disconnectAll = async () => { await photoPairingDisconnect(); onClose(); };
 
   const isGallery = mode === "gallery";
 
@@ -16263,7 +16429,7 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
           {connected ? <><Wifi size={14} /> الجوال متصل — بانتظار الصورة… 🟢</> : <><WifiOff size={14} /> جاري الانتظار…</>}
         </div>
 
-        {link && (
+        {!connected && link && (
           <div className="scanner-qr-wrap">
             <img
               className="scanner-qr-img"
@@ -16274,9 +16440,11 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
         )}
 
         <p className="scanner-hint">
-          {isGallery
-            ? "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — سيفتح معرض صور جوالك مباشرة لاختيار صورة، وستُرفق هنا تلقائياً خلال ثوانٍ"
-            : "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — ستفتح كاميرا جوالك مباشرة للالتقاط، وستُرفق الصورة هنا تلقائياً خلال ثوانٍ"}
+          {connected
+            ? "جوالك مرتبط بالفعل — ستفتح الكاميرا/المعرض على جوالك تلقائياً خلال ثوانٍ، وستُرفق الصورة هنا مباشرة. سيبقى الجوال مرتبطاً لبقية الجلسة، فلن تحتاج لإعادة مسح الباركود عند تصوير صور لأصناف أخرى."
+            : isGallery
+              ? "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — سيفتح معرض صور جوالك مباشرة لاختيار صورة، وستُرفق هنا تلقائياً خلال ثوانٍ. وسيبقى جوالك مرتبطاً بعدها لبقية الجلسة دون الحاجة لإعادة المسح."
+              : "صوّر هذا الباركود بكاميرا جوالك (أو أي تطبيق قارئ QR) — ستفتح كاميرا جوالك مباشرة للالتقاط، وستُرفق الصورة هنا تلقائياً خلال ثوانٍ. وسيبقى جوالك مرتبطاً بعدها لبقية الجلسة دون الحاجة لإعادة المسح."}
         </p>
 
         <details className="scanner-manual-fallback">
@@ -16291,8 +16459,13 @@ function PhotoCapturePairing({ mode = "camera", onCapture, onClose }) {
         </details>
 
         <div className="scanner-actions">
-          <button type="button" className="btn-ghost" onClick={regenerate}><RefreshCw size={14} /> رمز جديد</button>
-          <button type="button" className="btn-danger" onClick={onClose}><X size={14} /> إلغاء</button>
+          {!connected && (
+            <button type="button" className="btn-ghost" onClick={regenerate}><RefreshCw size={14} /> رمز جديد</button>
+          )}
+          {connected && (
+            <button type="button" className="btn-ghost" onClick={disconnectAll}><WifiOff size={14} /> قطع الاتصال نهائياً</button>
+          )}
+          <button type="button" className="btn-danger" onClick={onClose}><X size={14} /> إغلاق</button>
         </div>
       </div>
     </Modal>
@@ -16308,13 +16481,41 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
   const [errorMsg, setErrorMsg] = useState("");
   const [preview, setPreview] = useState("");
   const [sentCount, setSentCount] = useState(0);
-  const mode = initialMode === "gallery" ? "gallery" : "camera";
+  const [mode, setMode] = useState(initialMode === "gallery" ? "gallery" : "camera");
   const galleryRef = React.useRef(null);
   const cameraRef = React.useRef(null);
   const photoCounterRef = React.useRef(0);
   // يفتح الكاميرا (أو المعرض حسب الوضع) تلقائياً فور الاتصال، بدون أي
-  // ضغطة إضافية من المستخدم على الجوال — مرة واحدة فقط عند أول اتصال
+  // ضغطة إضافية من المستخدم على الجوال — يُعاد ضبطه مع كل طلب جديد
   const autoTriggeredRef = React.useRef(false);
+  // يبقى مستمعاً لجلسة الربط طوال الوقت بعد الاتصال (وليس فقط لحظة الربط)
+  // حتى يفتح الكاميرا/المعرض تلقائياً من جديد فور طلب اللابتوب صورة صنف
+  // آخر — دون الحاجة لإعادة مسح الباركود مطلقاً طوال هذه الجلسة
+  const lastRequestIdRef = React.useRef(0);
+  const unsubRef = React.useRef(null);
+
+  const stopListening = () => {
+    if (unsubRef.current) { try { unsubRef.current(); } catch {} unsubRef.current = null; }
+  };
+
+  const listen = (clean) => {
+    stopListening();
+    unsubRef.current = window.subscribeStorage
+      ? window.subscribeStorage(photoSessionKey(clean), (rawValue) => {
+          let parsed;
+          try { parsed = JSON.parse(rawValue); } catch { return; }
+          if (!parsed) return;
+          if (parsed.requestId && parsed.requestId > lastRequestIdRef.current) {
+            lastRequestIdRef.current = parsed.requestId;
+            setMode(parsed.requestMode === "gallery" ? "gallery" : "camera");
+            setPreview("");
+            setErrorMsg("");
+            autoTriggeredRef.current = false;
+            setStep("ready");
+          }
+        })
+      : null;
+  };
 
   const connect = async (rawCode) => {
     const clean = String(rawCode || "").trim();
@@ -16330,10 +16531,13 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
         return;
       }
       setCode(clean);
+      lastRequestIdRef.current = parsed.requestId || 0;
+      setMode(parsed.requestMode === "gallery" ? "gallery" : "camera");
       await window.storage?.set(
         photoSessionKey(clean),
         JSON.stringify({ ...parsed, status: "connected", phoneConnectedAt: Date.now() })
       );
+      listen(clean);
       setStep("ready");
     } catch {
       setStep("code");
@@ -16353,7 +16557,11 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
       photoCounterRef.current += 1;
       await window.storage?.set(
         photoSessionKey(code),
-        JSON.stringify({ code, status: "connected", photo: dataUrl, photoId: photoCounterRef.current, lastSentAt: Date.now() })
+        JSON.stringify({
+          code, status: "connected",
+          requestId: lastRequestIdRef.current, requestMode: mode,
+          photo: dataUrl, photoId: photoCounterRef.current, lastSentAt: Date.now(),
+        })
       );
       setSentCount((n) => n + 1);
       hapticPulse("success");
@@ -16368,11 +16576,13 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
 
   useEffect(() => {
     if (initialCode && initialCode.length === 4) connect(initialCode);
+    return () => stopListening();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // فور الوصول لخطوة "جاهز" (متصل باللابتوب) نفتح الكاميرا أو المعرض
-  // تلقائياً حسب الوضع المطلوب — دون انتظار ضغطة من المستخدم
+  // فور الوصول لخطوة "جاهز" (متصل باللابتوب، أو وصل طلب صورة جديد لصنف
+  // آخر) نفتح الكاميرا أو المعرض تلقائياً حسب الوضع المطلوب — دون انتظار
+  // ضغطة من المستخدم
   useEffect(() => {
     if (step !== "ready" || autoTriggeredRef.current) return;
     autoTriggeredRef.current = true;
@@ -16383,8 +16593,14 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
     return () => clearTimeout(t);
   }, [step, mode]);
 
-  const disconnect = () => {
+  // قطع الاتصال نهائياً — ينهي جلسة الربط بالكامل ويحتاج المستخدم لمسح
+  // باركود جديد بعدها؛ ما يحدث تلقائياً عند مجرد إغلاق صفحة الجوال أو
+  // التنقل بين الأصناف على اللابتوب (تبقى الجلسة مرتبطة طوال ذلك)
+  const disconnect = async () => {
+    stopListening();
+    if (code) { try { await window.storage?.delete(photoSessionKey(code)); } catch {} }
     setStep("code");
+    setCode("");
     setPreview("");
     setSentCount(0);
     autoTriggeredRef.current = false;
@@ -16461,9 +16677,11 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
           <p className="scanner-mobile-hint">
             {step === "sending"
               ? "جاري الإرسال…"
-              : mode === "gallery"
-                ? "اضغط لاختيار صورة من المعرض وإرسالها فوراً"
-                : "اضغط لالتقاط صورة وإرسالها فوراً"}
+              : step === "sent"
+                ? "الجوال ما زال مرتبطاً — سيفتح تلقائياً فور طلب صورة صنف آخر من اللابتوب، أو اضغط للالتقاط الآن"
+                : mode === "gallery"
+                  ? "اضغط لاختيار صورة من المعرض وإرسالها فوراً"
+                  : "اضغط لالتقاط صورة وإرسالها فوراً"}
           </p>
 
           {mode === "gallery" ? (
@@ -16476,7 +16694,7 @@ function PhotoCaptureMobilePage({ initialCode, initialMode }) {
             </button>
           )}
 
-          <button className="scanner-mobile-disconnect" onClick={disconnect}>قطع الاتصال / رمز جديد</button>
+          <button className="scanner-mobile-disconnect" onClick={disconnect}>قطع الاتصال نهائياً</button>
         </div>
       )}
 
