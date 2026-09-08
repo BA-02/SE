@@ -9365,13 +9365,14 @@ function FontStyles() {
         }
         body.printing-stickers .barcode-grid {
           display: grid !important;
-          grid-template-columns: repeat(auto-fill, minmax(38mm, 1fr)) !important;
-          gap: 2mm !important;
+          grid-template-columns: repeat(4, 1fr) !important;
+          gap: 0mm !important;
           padding: 0 !important;
+          align-content: start !important;
         }
         body.printing-stickers .barcode-card {
           border: none !important;
-          padding: 1mm !important;
+          padding: 0mm !important;
           gap: 0.5mm !important;
           break-inside: avoid;
           page-break-inside: avoid;
