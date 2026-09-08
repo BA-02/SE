@@ -1760,7 +1760,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   // لو المستخدم فلتر القائمة حالياً على قسم و/أو مجموعة معيّنة، نعبّي حقلي
   // "القسم" و"المجموعة" في نموذج الإضافة تلقائياً بنفس الفلتر بدل ما يضطر
   // يختارهم يدوياً من جديد — يبقيان قابلين للتغيير يدوياً بالطبع
-  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: "", notes: "", minQty: "", expiryDate: "", emoji: "", group: groupFilter !== "all" ? groupFilter : "", branch: myBranch || (branchFilter !== "all" ? branchFilter : ""), isContainer: false, parentCode: "", initialQty: "1", image: "" } });
+  const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: locationFilter !== "all" ? locationFilter : "", notes: "", minQty: "", expiryDate: "", emoji: "", group: groupFilter !== "all" ? groupFilter : "", branch: myBranch || (branchFilter !== "all" ? branchFilter : ""), isContainer: false, parentCode: "", initialQty: "1", image: "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
   const save = (item) => {
@@ -1892,7 +1892,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
             {locations.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
           </select>
         )}
-        {isOwner && (data.branches || []).length > 0 && (
+        {(isOwner || !myBranch) && (data.branches || []).length > 0 && (
           <select className="input location-select" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
             <option value="all">كل الأقسام</option>
             {data.branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -8647,9 +8647,9 @@ function FontStyles() {
 
       /* ---------- FORMS ---------- */
       .form-panel { padding: 18px; }
-      .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-width: 0; }
       .form-grid-move { grid-template-columns: 1fr 1fr 1fr; }
-      .field { display: flex; flex-direction: column; gap: 6px; position: relative; }
+      .field { display: flex; flex-direction: column; gap: 6px; position: relative; min-width: 0; }
       .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink); background: var(--surface-hover); border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
       .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--navy); cursor: pointer; }
       .box-contents-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
@@ -8724,7 +8724,9 @@ function FontStyles() {
       .input {
         border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font-family: 'Tajawal'; font-size: 13.5px;
         background: var(--paper); color: var(--ink); outline: none;
+        width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box;
       }
+      select.input { text-overflow: ellipsis; }
       .input:focus { border-color: var(--navy); background: var(--surface); }
       .input:disabled { color: var(--ink-soft); }
 
@@ -8757,9 +8759,9 @@ function FontStyles() {
       .modal-sheet-wide .form-grid { gap: 18px 22px; }
       .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px dashed var(--line); flex-shrink: 0; }
       .modal-title { font-family: 'Almarai'; font-weight: 800; font-size: 14.5px; }
-      .modal-body { padding: 18px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+      .modal-body { padding: 18px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; min-width: 0; box-sizing: border-box; }
       .modal-body * { max-width: 100%; box-sizing: border-box; }
-      .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; grid-column: 1 / -1; }
+      .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; grid-column: 1 / -1; flex-wrap: wrap; min-width: 0; }
       .modal-section-divider {
         grid-column: 1 / -1; font-size: 11.5px; font-weight: 700; color: var(--ink-soft);
         border-top: 1px dashed var(--line); padding-top: 12px; margin-top: 4px;
