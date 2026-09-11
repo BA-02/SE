@@ -128,7 +128,7 @@ import {
   ChevronDown, Download, Clock, MapPin, Hash, ScanLine, Camera, Video, ShieldAlert,
   Users, KeyRound, Layers, Shuffle, Eye, EyeOff, Bell, RotateCcw, Sun, Moon, Monitor, ClipboardList,
   BarChart3, PieChart, Percent, TrendingUp, ListChecks, Briefcase, Undo2, Tags,
-  Upload, FolderOpen, HardDriveDownload, Smartphone, RefreshCw, Copy, Wifi, WifiOff, PackageCheck
+  Upload, FolderOpen, HardDriveDownload, Smartphone, RefreshCw, Copy, Wifi, WifiOff, PackageCheck, Locate
 } from "lucide-react";
 import JsBarcode from "https://esm.sh/jsbarcode@3.11.6";
 
@@ -351,6 +351,17 @@ function withDefaults(d) {
     ownerRecoveryQuestion: d.ownerRecoveryQuestion || "",
     ownerRecoveryAnswer: d.ownerRecoveryAnswer || "",
     itemGroups: Array.isArray(d.itemGroups) && d.itemGroups.length ? d.itemGroups : DEFAULT_ITEM_GROUPS,
+    // سجلّ "المواقع" الرسمي (صفحة المواقع). لو البيانات قديمة (قبل إضافة
+    // هذه الصفحة) نبني السجلّ تلقائياً من كل قيم "الموقع" المستخدمة فعلياً
+    // بالأصناف الحالية، حتى لا نفقد أي موقع كان مكتوباً كنص حر سابقاً
+    // كل موقع ينتمي اختيارياً لقسم (نفس أقسام صفحة "الأقسام")؛ المواقع
+    // القديمة المحفوظة قبل هذه الميزة تُعامل تلقائياً كـ "عام لكل الأقسام"
+    locations: (Array.isArray(d.locations) && d.locations.length
+      ? d.locations
+      : [...new Set((Array.isArray(d.items) ? d.items : []).map((i) => i.category).filter(Boolean))]
+          .sort((a, b) => a.localeCompare(b, "ar"))
+          .map((name) => ({ id: genId("loc"), name }))
+    ).map((l) => ({ branch: "", ...l })),
     users: Array.isArray(d.users) ? d.users.map((u) => ({ canEdit: true, branch: "", ...u })) : [],
     tasks: Array.isArray(d.tasks) ? d.tasks : [],
     branches: (Array.isArray(d.branches) && d.branches.length ? d.branches : DEFAULT_BRANCHES).map((b) => ({ defaultGroup: "", ...b })),
@@ -477,6 +488,7 @@ const ARRAY_ID_KEYS = {
   tasks: "id",
   itemGroups: "id",
   auditLog: "id",
+  locations: "id",
 };
 
 function mergeArrayField(latestArr, beforeArr, afterArr, idKey) {
@@ -1040,7 +1052,7 @@ function downloadFullBackup(data, auditLog) {
 /*  فاحفظه بمكان آمن.                                                     */
 /* ------------------------------------------------------------------ */
 const FULL_BACKUP_FIELDS = [
-  "items", "incoming", "outgoing", "barcodes", "users", "itemGroups",
+  "items", "incoming", "outgoing", "barcodes", "users", "itemGroups", "locations",
   "branches", "tasks", "activities", "owners", "guestScreen", "guestWelcomeText", "guestListsConfig",
 ];
 
@@ -1763,6 +1775,15 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
   const openAdd = () => setModal({ mode: "add", item: { code: "", name: "", category: locationFilter !== "all" ? locationFilter : "", notes: "", minQty: "", expiryDate: "", emoji: "", group: groupFilter !== "all" ? groupFilter : "", branch: myBranch || (branchFilter !== "all" ? branchFilter : ""), isContainer: false, parentCode: "", initialQty: "1", image: "" } });
   const openEdit = (item) => setModal({ mode: "edit", item: { ...item } });
 
+  // يسجّل موقعاً جديداً بصفحة "المواقع" مباشرة من نموذج إضافة/تعديل الصنف
+  // (خيار "+ إضافة موقع جديد")، بدون تكرار لو الاسم مسجّل مسبقاً
+  const createLocation = (name, branch) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if ((data.locations || []).some((l) => l.name === trimmed)) return;
+    setData({ ...data, locations: [...(data.locations || []), { id: genId("loc"), name: trimmed, branch: branch || "" }] });
+  };
+
   const save = (item) => {
     if (!item.code.trim() || !item.name.trim()) {
       notify("الكود واسم المنتج مطلوبان", "error");
@@ -2155,7 +2176,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
 
       {modal && (
         <Modal wide title={modal.mode === "add" ? "إضافة غرض جديد" : "تعديل بيانات الصنف"} onClose={() => setModal(null)}>
-          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} barcodes={data.barcodes} mode={modal.mode} currentBalance={balanceFor(modal.item.code)} onCancel={() => setModal(null)} onSave={save} />
+          <ItemForm item={modal.item} itemGroups={data.itemGroups} branches={data.branches} allItems={data.items} barcodes={data.barcodes} locations={data.locations} onCreateLocation={createLocation} mode={modal.mode} currentBalance={balanceFor(modal.item.code)} onCancel={() => setModal(null)} onSave={save} />
         </Modal>
       )}
 
@@ -2413,7 +2434,7 @@ function ImageUploadField({ value, onChange }) {
   );
 }
 
-function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, currentBalance, onCancel, onSave }) {
+function ItemForm({ item, itemGroups, branches, allItems, barcodes, locations, onCreateLocation, mode, currentBalance, onCancel, onSave }) {
   const [form, setForm] = useState({
     isContainer: false, parentCode: "",
     initialQty: mode === "edit" ? String(currentBalance ?? 0) : "1",
@@ -2480,14 +2501,6 @@ function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, curren
     setForm({ ...form, group: groupId, emoji: suggested });
   };
 
-  // مواقع مقترحة (Autocomplete) لحقل "الموقع" بناءً على المواقع المستخدمة
-  // فعلياً داخل نفس القسم المختار — لأن المواقع منطقياً موجودة داخل الأقسام
-  // (مثال: قسم المكتبة بداخله مواقع مثل "الرف الأول")
-  const suggestedLocations = React.useMemo(() => {
-    const pool = (allItems || []).filter((i) => !form.branch || i.branch === form.branch);
-    return [...new Set(pool.map((i) => i.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ar"));
-  }, [allItems, form.branch]);
-
   return (
     <>
     <div className="form-grid">
@@ -2535,14 +2548,11 @@ function ItemForm({ item, itemGroups, branches, allItems, barcodes, mode, curren
         </select>
       </Field>
       <Field label="الموقع (داخل القسم)">
-        <input
-          className="input" list="item-location-suggestions"
-          value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
-          placeholder="مثال: الرف الأول"
+        <LocationPicker
+          locations={locations} value={form.category} branch={form.branch}
+          onChange={(name) => setForm({ ...form, category: name })}
+          onCreateLocation={onCreateLocation}
         />
-        <datalist id="item-location-suggestions">
-          {suggestedLocations.map((loc) => <option key={loc} value={loc} />)}
-        </datalist>
       </Field>
       <Field label="نوع الصنف">
         <label className="checkbox-row">
@@ -3135,14 +3145,22 @@ function AddOrMoveItemModal({ kind, data, setData, notify, inventory, onClose })
                   {(data.itemGroups || []).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                 </select>
               </Field>
-              <Field label="الموقع / الفئة">
-                <input className="input" value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} placeholder="مثال: الدولاب البني 1" />
-              </Field>
               <Field label="القسم">
                 <select className="input" value={form.branch || ""} onChange={(e) => setForm((f) => ({ ...f, branch: e.target.value }))}>
                   <option value="">بدون قسم محدد</option>
                   {(data.branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
                 </select>
+              </Field>
+              <Field label="الموقع / الفئة">
+                <LocationPicker
+                  locations={data.locations} value={form.category} branch={form.branch}
+                  onChange={(name) => setForm((f) => ({ ...f, category: name }))}
+                  onCreateLocation={(name, branch) => {
+                    const trimmed = name.trim();
+                    if (!trimmed || (data.locations || []).some((l) => l.name === trimmed)) return;
+                    setData({ ...data, locations: [...(data.locations || []), { id: genId("loc"), name: trimmed, branch: branch || "" }] });
+                  }}
+                />
               </Field>
               <Field label={`حد التنبيه الأدنى (اختياري، افتراضي ${LOW_STOCK_THRESHOLD})`}>
                 <input
@@ -4463,6 +4481,7 @@ const NAV = [
   { key: "users", label: "المستخدمون", icon: Users, ownerOnly: true },
   { key: "groups", label: "المجموعات", icon: Layers, ownerOnly: true },
   { key: "branches", label: "الأقسام", icon: MapPin, ownerOnly: true },
+  { key: "locations", label: "المواقع", icon: Locate, ownerOnly: true },
 ];
 
 // صلاحيات إضافية ليست صفحات بحد ذاتها (لا تظهر بالقائمة الجانبية) لكن تُمنح
@@ -4490,7 +4509,7 @@ function OwnersPage({ data, setData, notify, currentOwnerId }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const owners = data.owners || [];
 
-  const openAdd = () => setModal({ mode: "add", owner: { name: "", password: randomPassword(), permissions: null } });
+  const openAdd = () => setModal({ mode: "add", owner: { name: "", password: randomPassword(), permissions: null, recoveryQuestion: "", recoveryAnswer: "" } });
   const openEdit = (o) => setModal({ mode: "edit", owner: { ...o } });
 
   const save = (form) => {
@@ -4501,6 +4520,13 @@ function OwnersPage({ data, setData, notify, currentOwnerId }) {
     }
     const dup = owners.some((o) => o.name === name && o.id !== form.id);
     if (dup) { notify("هذا الاسم مستخدم لرئيس آخر بالفعل", "error"); return; }
+
+    const recoveryQuestion = (form.recoveryQuestion || "").trim();
+    const recoveryAnswer = (form.recoveryAnswer || "").trim();
+    if ((recoveryQuestion && !recoveryAnswer) || (!recoveryQuestion && recoveryAnswer)) {
+      notify("لاستخدام استرداد كلمة المرور، أدخل السؤال والإجابة معاً", "error");
+      return;
+    }
 
     const willBeRestricted = Array.isArray(form.permissions);
     if (willBeRestricted) {
@@ -4514,9 +4540,9 @@ function OwnersPage({ data, setData, notify, currentOwnerId }) {
     const record = {
       id: form.id || genId("owner"), name, password: form.password.trim(),
       permissions: willBeRestricted ? OWNER_GRANTABLE_PAGES.map((p) => p.key).filter((k) => form.permissions.includes(k)) : null,
+      recoveryQuestion, recoveryAnswer,
     };
     const exists = owners.some((o) => o.id === record.id);
-    // نحافظ على سؤال/إجابة الاسترداد الحالية لو كانت موجودة عند التعديل
     const merged = exists ? { ...owners.find((o) => o.id === record.id), ...record } : record;
     const next = exists ? owners.map((o) => (o.id === merged.id ? merged : o)) : [...owners, merged];
     setData({ ...data, owners: next });
@@ -4630,6 +4656,13 @@ function OwnerForm({ owner, onCancel, onSave }) {
             <Shuffle size={15} />
           </button>
         </div>
+      </Field>
+      <div className="modal-section-divider">استرداد كلمة المرور (اختياري) — يقدر أي رئيس بتحكم كامل يضبطه من هنا حتى لو الرئيس نفسه نسى كلمة مروره</div>
+      <Field label="سؤال استرداد — يُستخدم لو نسي هذا الرئيس كلمة مروره لاحقاً">
+        <input className="input" value={form.recoveryQuestion || ""} onChange={(e) => setForm({ ...form, recoveryQuestion: e.target.value })} placeholder="مثال: ما اسم أول موقع عملت فيه؟" />
+      </Field>
+      <Field label="الإجابة">
+        <input className="input" value={form.recoveryAnswer || ""} onChange={(e) => setForm({ ...form, recoveryAnswer: e.target.value })} placeholder="الإجابة" />
       </Field>
       <Field label="نوع الصلاحية" full>
         <div className="login-choices" style={{ gap: 6 }}>
@@ -5134,6 +5167,225 @@ function BranchForm({ branch, itemGroups, onCancel, onSave }) {
         <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
       </div>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  LOCATIONS PAGE (site owner only) — سجلّ رسمي لمواقع الأصناف داخل     */
+/*  الأقسام (مثل "الرف الأول")، بدل ما كانت مجرد نص حر يُكتب يدوياً.      */
+/*  المواقع تُطابق أصناف "الموقع" بالاسم (وليس بمعرّف) حتى تبقى متوافقة   */
+/*  مع كل البيانات القديمة المحفوظة قبل إضافة هذه الصفحة.                */
+/* ------------------------------------------------------------------ */
+
+function LocationsPage({ data, setData, notify }) {
+  const [modal, setModal] = useState(null); // { mode: 'add'|'edit', location: { id?, name, branch }, originalName? }
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  // بعد تعديل الاسم: نسأل المستخدم صراحة هل يريد تحديث اسم الموقع بكل
+  // المنتجات المسجلة عليه بالاسم القديم أم يترك المنتجات كما هي
+  const [renamePrompt, setRenamePrompt] = useState(null); // { oldName, newName, count }
+  // فلتر القسم بالجدول فقط (لا يغيّر البيانات نفسها) — يساعد لو عدد
+  // المواقع كبير ومقسّمة على أقسام كثيرة
+  const [branchFilter, setBranchFilter] = useState("all");
+
+  const branches = data.branches || [];
+  const allLocations = data.locations || [];
+  const locations = branchFilter === "all" ? allLocations : allLocations.filter((l) => (l.branch || "") === branchFilter);
+  const countFor = (name) => data.items.filter((i) => i.category === name).length;
+  const branchName = (id) => branches.find((b) => b.id === id)?.name || "";
+
+  const openAdd = () => setModal({ mode: "add", location: { name: "", branch: branchFilter !== "all" ? branchFilter : "" } });
+  const openEdit = (loc) => setModal({ mode: "edit", location: { branch: "", ...loc }, originalName: loc.name });
+
+  const save = (form, originalName) => {
+    const name = form.name.trim();
+    if (!name) { notify("اسم الموقع مطلوب", "error"); return; }
+    const duplicate = allLocations.some((l) => l.name === name && l.id !== form.id);
+    if (duplicate) { notify("يوجد موقع آخر بنفس هذا الاسم مسبقاً", "error"); return; }
+
+    const record = { id: form.id || genId("loc"), name, branch: form.branch || "" };
+    const exists = allLocations.some((l) => l.id === record.id);
+    const nextLocations = exists ? allLocations.map((l) => (l.id === record.id ? record : l)) : [...allLocations, record];
+    setData({ ...data, locations: nextLocations });
+    setModal(null);
+
+    if (exists && originalName && originalName !== name) {
+      const count = countFor(originalName);
+      if (count > 0) {
+        // نعرض السؤال بعد الحفظ مباشرة بدل ما نغيّر أسماء المنتجات صمتاً
+        setRenamePrompt({ oldName: originalName, newName: name, count });
+        return;
+      }
+    }
+    notify(exists ? "تم تحديث الموقع" : "تمت إضافة الموقع");
+  };
+
+  const applyRenameToItems = () => {
+    if (!renamePrompt) return;
+    const { oldName, newName } = renamePrompt;
+    const items = data.items.map((i) => (i.category === oldName ? { ...i, category: newName } : i));
+    setData({ ...data, items });
+    notify(`تم تحديث اسم الموقع في ${renamePrompt.count} منتج`);
+    setRenamePrompt(null);
+  };
+
+  const remove = (loc) => {
+    // الأصناف المرتبطة بهذا الموقع تبقى موجودة، فقط يُفرغ حقل "الموقع" لديها
+    const items = data.items.map((i) => (i.category === loc.name ? { ...i, category: "" } : i));
+    setData({ ...data, locations: allLocations.filter((l) => l.id !== loc.id), items });
+    setConfirmDelete(null);
+    notify("تم حذف الموقع");
+  };
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="مواقع الأصناف" title="المواقع" subtitle="سجّل مواقع دقيقة داخل كل قسم (مثل «الرف الأول») لتظهر كقائمة منسدلة عند إضافة أي غرض من نفس القسم فقط"
+        action={<button className="btn-primary" onClick={openAdd}><Plus size={16} /> إضافة موقع</button>}
+      />
+      {branches.length > 0 && allLocations.length > 0 && (
+        <div className="toolbar">
+          <select className="input location-select" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
+            <option value="all">كل الأقسام</option>
+            <option value="">عام (بدون قسم محدد)</option>
+            {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        </div>
+      )}
+      <div className="panel">
+        {locations.length === 0 ? (
+          <EmptyState icon={Locate} title="لا توجد مواقع مسجّلة بعد" hint="أضف موقعاً مثل «الرف الأول» أو «الدولاب البني 1» ليظهر كخيار جاهز عند إضافة أي غرض" />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger-table">
+              <thead><tr><th>اسم الموقع</th><th>القسم</th><th>عدد الأصناف</th><th></th></tr></thead>
+              <tbody>
+                {locations.map((l) => (
+                  <tr key={l.id}>
+                    <td className="cell-strong"><Locate size={13} style={{ marginLeft: 4, verticalAlign: "-2px" }} />{l.name}</td>
+                    <td className={l.branch ? "" : "cell-muted"}>{l.branch ? branchName(l.branch) : "عام لكل الأقسام"}</td>
+                    <td className="cell-mono">{countFor(l.name)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="icon-btn" onClick={() => openEdit(l)}><Pencil size={15} /></button>
+                        <button className="icon-btn icon-btn-danger" onClick={() => setConfirmDelete(l)}><Trash2 size={15} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {modal && (
+        <Modal title={modal.mode === "add" ? "إضافة موقع" : "تعديل الموقع"} onClose={() => setModal(null)}>
+          <LocationForm location={modal.location} branches={branches} onCancel={() => setModal(null)} onSave={(form) => save(form, modal.originalName)} />
+        </Modal>
+      )}
+
+      {renamePrompt && (
+        <Modal title="تحديث اسم الموقع بالمنتجات؟" onClose={() => setRenamePrompt(null)}>
+          <p className="confirm-text">
+            تم تغيير اسم الموقع من «{renamePrompt.oldName}» إلى «{renamePrompt.newName}». هل تريد تحديث اسم الموقع في
+            {" "}{renamePrompt.count}{" "}منتج مسجّل عليه بالاسم القديم أيضاً؟
+          </p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setRenamePrompt(null)}>لا، اتركها كما هي</button>
+            <button className="btn-primary" onClick={applyRenameToItems}><Check size={15} /> نعم، حدّث كل المنتجات</button>
+          </div>
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="تأكيد الحذف" onClose={() => setConfirmDelete(null)}>
+          <p className="confirm-text">هل تريد حذف موقع «{confirmDelete.name}»؟ الأصناف المرتبطة به تبقى موجودة بدون موقع محدد.</p>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setConfirmDelete(null)}>إلغاء</button>
+            <button className="btn-danger" onClick={() => remove(confirmDelete)}>حذف نهائياً</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function LocationForm({ location, branches, onCancel, onSave }) {
+  const [form, setForm] = useState(location);
+  return (
+    <div className="form-grid">
+      <Field label="اسم الموقع">
+        <input
+          autoFocus className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+          placeholder="مثال: الرف الأول، الدولاب البني 1"
+        />
+      </Field>
+      <Field label="القسم (اختياري)">
+        <select className="input" value={form.branch || ""} onChange={(e) => setForm({ ...form, branch: e.target.value })}>
+          <option value="">عام لكل الأقسام</option>
+          {(branches || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+        <div className="field-hint">لو حددت قسماً، هذا الموقع يظهر فقط عند إضافة غرض من نفس القسم</div>
+      </Field>
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>إلغاء</button>
+        <button className="btn-primary" onClick={() => onSave(form)}><Check size={15} /> حفظ</button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  LOCATION PICKER — قائمة منسدلة بالمواقع المسجّلة صفحة "المواقع"،     */
+/*  مع خيار إضافة موقع جديد بسرعة من داخل أي نموذج (إضافة/تعديل غرض،     */
+/*  أو تسجيل داخل/خارج سريع) دون الحاجة للخروج والذهاب لصفحة المواقع.    */
+/* ------------------------------------------------------------------ */
+
+function LocationPicker({ locations, value, onChange, onCreateLocation, branch }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  // كل قسم له مواقعه الخاصة فقط: لو النموذج فيه قسم مختار نعرض فقط مواقع
+  // هذا القسم + المواقع "العامة" (بدون قسم محدد لها، غالباً بيانات قديمة).
+  // لو ما فيه قسم مختار بعد، نعرض كل المواقع حتى لا نخفي شيء بصمت
+  const list = (locations || []).filter((l) => !branch || !l.branch || l.branch === branch);
+  const isRegistered = !value || list.some((l) => l.name === value);
+
+  const commitNew = () => {
+    const name = draft.trim();
+    if (!name) { setAdding(false); return; }
+    onCreateLocation(name, branch || "");
+    onChange(name);
+    setAdding(false);
+    setDraft("");
+  };
+
+  return (
+    <>
+      <select
+        className="input"
+        value={adding ? "__new__" : (value || "")}
+        onChange={(e) => {
+          if (e.target.value === "__new__") { setAdding(true); setDraft(""); return; }
+          setAdding(false);
+          onChange(e.target.value);
+        }}
+      >
+        <option value="">بدون موقع محدد</option>
+        {list.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+        {value && !isRegistered && <option value={value}>{value} (غير مسجّل بقائمة المواقع)</option>}
+        <option value="__new__">+ إضافة موقع جديد…</option>
+      </select>
+      {adding && (
+        <div className="scan-input-row" style={{ marginTop: 8 }}>
+          <input
+            autoFocus className="input" value={draft} onChange={(e) => setDraft(e.target.value)}
+            placeholder="اسم الموقع الجديد"
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNew(); } }}
+          />
+          <button type="button" className="btn-ghost" onClick={commitNew}><Check size={15} /> إضافة</button>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -8054,6 +8306,7 @@ function App() {
           {safePage === "users" && isOwner && <UsersPage data={data} setData={setData} notify={notify} />}
           {safePage === "groups" && isOwner && <GroupsPage data={data} setData={setData} notify={notify} />}
           {safePage === "branches" && isOwner && <BranchesPage data={data} setData={setData} notify={notify} />}
+          {safePage === "locations" && isOwner && <LocationsPage data={data} setData={setData} notify={notify} />}
           {safePage === "reports" && <ReportsPage data={data} inventory={inventory} auditLog={auditLog} />}
         </main>
       </div>
