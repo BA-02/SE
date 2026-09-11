@@ -3899,6 +3899,7 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
   const [addedFilter, setAddedFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
+  const [searchCameraOpen, setSearchCameraOpen] = useState(false);
   const [flashIdx, setFlashIdx] = useState(null);
   const cardRefs = React.useRef({});
 
@@ -4110,8 +4111,18 @@ function BarcodesPage({ data, setData, notify, readOnly }) {
         <div className="search-box">
           <Search size={16} />
           <input placeholder="ابحث بالاسم أو الرقم أو القسم…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <button type="button" className="search-cam-btn" title="بحث بالكاميرا" onClick={() => setSearchCameraOpen(true)}>
+            <Camera size={15} />
+          </button>
         </div>
       </div>
+
+      {searchCameraOpen && (
+        <BarcodeCameraModal
+          onClose={() => setSearchCameraOpen(false)}
+          onDetect={(code) => { setQuery(code); setSearchCameraOpen(false); }}
+        />
+      )}
 
       {branches.length > 0 && (
         <div className="filter-chips">
@@ -5667,6 +5678,7 @@ function timeAgoAr(ts) {
 function AuditPage({ log, isOwner, currentUser }) {
   const [query, setQuery] = useState("");
   const [byFilter, setByFilter] = useState("all");
+  const [searchCameraOpen, setSearchCameraOpen] = useState(false);
 
   // منظم عادي يشوف نشاطه هو فقط؛ رئيس الموقع فقط يشوف سجل الجميع
   const visibleLog = useMemo(
@@ -5695,12 +5707,22 @@ function AuditPage({ log, isOwner, currentUser }) {
           <div className="search-box">
             <Search size={16} />
             <input placeholder="ابحث بالحدث أو الاسم…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <button type="button" className="search-cam-btn" title="بحث بالكاميرا" onClick={() => setSearchCameraOpen(true)}>
+              <Camera size={15} />
+            </button>
           </div>
           <select className="input" style={{ maxWidth: 200 }} value={byFilter} onChange={(e) => setByFilter(e.target.value)}>
             <option value="all">كل المنظمين</option>
             {actors.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
         </div>
+      )}
+
+      {searchCameraOpen && (
+        <BarcodeCameraModal
+          onClose={() => setSearchCameraOpen(false)}
+          onDetect={(code) => { setQuery(code); setSearchCameraOpen(false); }}
+        />
       )}
 
       <div className="panel">
