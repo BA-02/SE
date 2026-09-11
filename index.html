@@ -2043,6 +2043,9 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                 </div>
                 <CodeTag code={it.code} />
                 <div className="inv-card-loc">
+                  <Boxes size={12} style={{ opacity: 0.55 }} /> الكمية: <span className="cell-strong">{balanceFor(it.code)}</span>
+                </div>
+                <div className="inv-card-loc">
                   <MapPin size={12} style={{ opacity: 0.55 }} /> {it.category || "—"}
                   {branchName(it.branch) ? ` · ${branchName(it.branch)}` : ""}
                   {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
@@ -2136,6 +2139,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                   <th>م</th>
                   <th>الكود</th>
                   <th>اسم المنتج</th>
+                  <th>الكمية الموجودة</th>
                   <th>الموقع / الفئة</th>
                   <th>القسم</th>
                   <th>ملاحظات</th>
@@ -2157,6 +2161,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                       {it.emoji ? `${it.emoji} ` : ""}{it.name}
                       {it.isContainer && <span className="box-badge">📦 صندوق</span>}
                     </td>
+                    <td className="cell-mono cell-strong">{balanceFor(it.code)}</td>
                     <td className="cell-muted">
                       <MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}
                       {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
@@ -11831,6 +11836,9 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                 </div>
                 <CodeTag code={it.code} />
                 <div className="inv-card-loc">
+                  <Boxes size={12} style={{ opacity: 0.55 }} /> الكمية: <span className="cell-strong">{balanceFor(it.code)}</span>
+                </div>
+                <div className="inv-card-loc">
                   <MapPin size={12} style={{ opacity: 0.55 }} /> {it.category || "—"}
                   {branchName(it.branch) ? ` · ${branchName(it.branch)}` : ""}
                   {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
@@ -11924,6 +11932,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                   <th>م</th>
                   <th>الكود</th>
                   <th>اسم المنتج</th>
+                  <th>الكمية الموجودة</th>
                   <th>الموقع / الفئة</th>
                   <th>القسم</th>
                   <th>ملاحظات</th>
@@ -11945,6 +11954,7 @@ function ItemsPage({ data, setData, notify, readOnly, onPrint, systemNotify, cur
                       {it.emoji ? `${it.emoji} ` : ""}{it.name}
                       {it.isContainer && <span className="box-badge">📦 صندوق</span>}
                     </td>
+                    <td className="cell-mono cell-strong">{balanceFor(it.code)}</td>
                     <td className="cell-muted">
                       <MapPin size={12} style={{ opacity: 0.5, marginLeft: 4 }} />{it.category || "—"}
                       {it.parentCode && <span className="box-badge">↳ داخل: {itemName(it.parentCode) || "—"}</span>}
