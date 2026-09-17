@@ -8,7 +8,7 @@
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#0f172a">
+<meta name="theme-color" content="#4a3020">
 <link rel="icon" href="icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="mobile-web-app-capable" content="yes">
@@ -17,34 +17,50 @@
 <meta name="apple-mobile-web-app-title" content="البوابة">
 
 <script src="https://cdn.tailwindcss.com"></script>
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
 
 <style>
   :root{
-    --bg-1:#0b1120;
-    --bg-2:#0f172a;
-    --card-bg:rgba(255,255,255,0.04);
-    --card-border:rgba(255,255,255,0.08);
-    --accent-1:#6366f1;
-    --accent-2:#22d3ee;
+    /* نفس هوية الألوان المستخدمة في المواقع الثلاثة (كرافت/قهوة دافئة) */
+    --espresso:#2b1c13;
+    --coffee:#4a3020;
+    --cinnamon:#7a5236;
+    --caramel:#a8794f;
+    --latte:#cba573;
+    --sand:#e7d7bd;
+    --linen:#f6efe3;
+    --paper:#fffdfa;
+
+    --bg:#f7efe2;
+    --bg-2:#fdfbf8;
+    --panel:var(--paper);
+    --line: rgba(74,48,32,0.14);
+    --gold-soft: rgba(168,121,79,0.16);
+    --text:var(--espresso);
+    --text-dim: rgba(43,28,19,0.62);
+
+    /* الأخضر والكهرماني من هوية المستودع، لتمييز البطاقات */
+    --green:#3F6D4E;   --green-bg:#E9F1E9;
+    --amber:#B3792C;   --amber-bg:#FBF0DD;
   }
-  *{ font-family:'Cairo', system-ui, sans-serif; }
+  *{ font-family:'Tajawal', system-ui, sans-serif; }
   html,body{ height:100%; }
   body{
     margin:0;
-    background:
-      radial-gradient(1200px 600px at 15% -10%, rgba(99,102,241,0.18), transparent 60%),
-      radial-gradient(1000px 600px at 110% 10%, rgba(34,211,238,0.14), transparent 55%),
-      linear-gradient(180deg, var(--bg-1), var(--bg-2));
-    color:#e5e7eb;
+    background-image:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='150' height='150' viewBox='0 0 150 150'><g fill='none' stroke='%234a3020' stroke-opacity='0.06' stroke-width='1.2'><path d='M75 10 L90 56 L136 71 L90 86 L75 132 L60 86 L14 71 L60 56 Z'/><circle cx='75' cy='71' r='22'/><circle cx='75' cy='71' r='34'/></g></svg>"),
+      linear-gradient(180deg, var(--bg-2) 0%, var(--bg-2) 35%, var(--bg) 100%);
+    background-repeat: repeat, no-repeat;
+    background-size: 150px 150px, 100% 100%;
+    color:var(--text);
     min-height:100vh;
     display:flex;
     flex-direction:column;
   }
 
   .glass{
-    background:var(--card-bg);
-    border:1px solid var(--card-border);
+    background:rgba(255,253,250,0.82);
+    border:1px solid var(--line);
     backdrop-filter:blur(14px);
     -webkit-backdrop-filter:blur(14px);
   }
@@ -52,12 +68,14 @@
   .card{
     position:relative;
     overflow:hidden;
+    background:var(--panel);
+    border:1px solid var(--line);
     transition:transform .35s cubic-bezier(.2,.8,.2,1), box-shadow .35s ease, border-color .35s ease;
   }
   .card:hover{
     transform:translateY(-8px) scale(1.015);
-    border-color:rgba(255,255,255,0.18);
-    box-shadow:0 20px 45px -15px rgba(0,0,0,0.55);
+    border-color:var(--caramel);
+    box-shadow:0 20px 45px -18px rgba(74,48,32,0.35);
   }
   .card::before{
     content:"";
@@ -65,7 +83,7 @@
     inset:0;
     opacity:0;
     transition:opacity .35s ease;
-    background:radial-gradient(500px circle at var(--mx,50%) var(--my,0%), rgba(255,255,255,0.08), transparent 60%);
+    background:radial-gradient(500px circle at var(--mx,50%) var(--my,0%), rgba(168,121,79,0.12), transparent 60%);
     pointer-events:none;
   }
   .card:hover::before{ opacity:1; }
@@ -81,7 +99,7 @@
     position:absolute; inset:-2px;
     border-radius:inherit;
     padding:1px;
-    background:linear-gradient(135deg, rgba(99,102,241,0.5), rgba(34,211,238,0.5));
+    background:linear-gradient(135deg, rgba(168,121,79,0.55), rgba(122,82,54,0.35));
     -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
     -webkit-mask-composite: xor;
     mask-composite: exclude;
@@ -101,7 +119,7 @@
 
   ::-webkit-scrollbar{ width:10px; height:10px; }
   ::-webkit-scrollbar-track{ background:transparent; }
-  ::-webkit-scrollbar-thumb{ background:rgba(255,255,255,0.15); border-radius:999px; }
+  ::-webkit-scrollbar-thumb{ background:var(--sand); border-radius:999px; }
 
   #install-toast{
     transition:opacity .3s ease, transform .3s ease;
@@ -114,20 +132,24 @@
 <header class="glass sticky top-0 z-30">
   <div class="max-w-6xl mx-auto px-5 py-3 flex items-center justify-between">
     <a href="index.html" class="flex items-center gap-2 group">
-      <span class="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-400 shadow-lg shadow-indigo-500/20 group-hover:scale-105 transition">
+      <span class="flex items-center justify-center w-9 h-9 rounded-xl shadow-lg group-hover:scale-105 transition" style="background:linear-gradient(135deg, var(--cinnamon), var(--caramel));">
+        <!-- أيقونة بيت -->
         <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 9.5 12 3l9 6.5"/>
-          <path d="M5 10v10h14V10"/>
+          <path d="M3 10.5 12 3l9 7.5"/>
+          <path d="M5 9.5V21h14V9.5"/>
+          <path d="M9.5 21v-6h5v6"/>
         </svg>
       </span>
-      <span class="font-extrabold text-lg tracking-tight">البوابة الرئيسية</span>
+      <span class="font-extrabold text-lg tracking-tight" style="color:var(--espresso);">البوابة الرئيسية</span>
     </a>
 
-    <button id="install-btn" class="hidden items-center gap-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2 text-sm font-semibold transition">
+    <button id="install-btn" class="hidden items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition"
+      style="background:var(--gold-soft); border:1px solid var(--line); color:var(--coffee);">
+      <!-- أيقونة بيت لزر التثبيت كتطبيق -->
       <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 3v12"/>
-        <path d="m7 10 5 5 5-5"/>
-        <path d="M5 21h14"/>
+        <path d="M3 10.5 12 3l9 7.5"/>
+        <path d="M5 9.5V21h14V9.5"/>
+        <path d="M9.5 21v-6h5v6"/>
       </svg>
       تثبيت التطبيق
     </button>
@@ -137,10 +159,10 @@
 <!-- Hero -->
 <main class="flex-1">
   <section class="max-w-6xl mx-auto px-5 pt-14 pb-6 text-center fade-up">
-    <h1 class="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-l from-indigo-300 via-white to-cyan-300">
+    <h1 class="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight" style="color:var(--espresso);">
       اختر الوجهة التي تريد الدخول إليها
     </h1>
-    <p class="mt-4 text-slate-400 max-w-xl mx-auto">
+    <p class="mt-4 max-w-xl mx-auto" style="color:var(--text-dim);">
       ثلاثة أنظمة مستقلة، كل نظام يعمل بقاعدة بياناته الخاصة — اضغط على البطاقة للانتقال مباشرة.
     </p>
   </section>
@@ -151,24 +173,25 @@
 
       <!-- Card 1: Warehouse -->
       <a href="warehouse.html"
-         class="card glass rounded-3xl p-7 flex flex-col gap-5 fade-up"
+         class="card rounded-3xl p-7 flex flex-col gap-5 fade-up"
          style="animation-delay:.05s"
          onmousemove="cardTilt(event)">
         <span class="shine"></span>
-        <div class="icon-wrap w-16 h-16 rounded-2xl flex items-center justify-center bg-gradient-to-br from-amber-500/20 to-orange-500/10 border border-amber-400/20">
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-amber-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <div class="icon-wrap w-16 h-16 rounded-2xl flex items-center justify-center"
+             style="background:var(--amber-bg); border:1px solid rgba(179,121,44,0.35);">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8" style="color:var(--amber);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 8 12 3 3 8l9 5 9-5Z"/>
             <path d="M3 8v8l9 5 9-5V8"/>
             <path d="M12 13v8"/>
           </svg>
         </div>
         <div class="flex-1">
-          <h2 class="text-xl font-bold text-white">سجل المستودع</h2>
-          <p class="mt-2 text-sm text-slate-400 leading-relaxed">
+          <h2 class="text-xl font-bold" style="color:var(--espresso);">سجل المستودع</h2>
+          <p class="mt-2 text-sm leading-relaxed" style="color:var(--text-dim);">
             متابعة وإدارة حركة الأصناف والمخزون بشكل كامل ومتزامن.
           </p>
         </div>
-        <div class="flex items-center justify-between text-sm font-semibold text-amber-300">
+        <div class="flex items-center justify-between text-sm font-semibold" style="color:var(--amber);">
           <span>الدخول إلى الموقع</span>
           <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 rtl:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="m9 18 6-6-6-6"/>
@@ -178,24 +201,25 @@
 
       <!-- Card 2: Quran Plan -->
       <a href="quran-plan.html"
-         class="card glass rounded-3xl p-7 flex flex-col gap-5 fade-up"
+         class="card rounded-3xl p-7 flex flex-col gap-5 fade-up"
          style="animation-delay:.15s"
          onmousemove="cardTilt(event)">
         <span class="shine"></span>
-        <div class="icon-wrap w-16 h-16 rounded-2xl flex items-center justify-center bg-gradient-to-br from-emerald-500/20 to-teal-500/10 border border-emerald-400/20">
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-emerald-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <div class="icon-wrap w-16 h-16 rounded-2xl flex items-center justify-center"
+             style="background:var(--green-bg); border:1px solid rgba(63,109,78,0.30);">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8" style="color:var(--green);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 21V7a4 4 0 0 0-4-4H3v18h5a4 4 0 0 1 4 4Z" transform="translate(0,-4)"/>
             <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
             <path d="M4 4.5v13A2.5 2.5 0 0 0 6.5 20H20V4.5A2.5 2.5 0 0 0 17.5 2H6.5A2.5 2.5 0 0 0 4 4.5Z" fill="none"/>
           </svg>
         </div>
         <div class="flex-1">
-          <h2 class="text-xl font-bold text-white">خطة القرآن الكريم</h2>
-          <p class="mt-2 text-sm text-slate-400 leading-relaxed">
+          <h2 class="text-xl font-bold" style="color:var(--espresso);">خطة القرآن الكريم</h2>
+          <p class="mt-2 text-sm leading-relaxed" style="color:var(--text-dim);">
             متابعة الورد اليومي وخطط الحفظ والمراجعة بسهولة.
           </p>
         </div>
-        <div class="flex items-center justify-between text-sm font-semibold text-emerald-300">
+        <div class="flex items-center justify-between text-sm font-semibold" style="color:var(--green);">
           <span>الدخول إلى الموقع</span>
           <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 rtl:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="m9 18 6-6-6-6"/>
@@ -205,22 +229,23 @@
 
       <!-- Card 3: Points -->
       <a href="points.html"
-         class="card glass rounded-3xl p-7 flex flex-col gap-5 fade-up"
+         class="card rounded-3xl p-7 flex flex-col gap-5 fade-up"
          style="animation-delay:.25s"
          onmousemove="cardTilt(event)">
         <span class="shine"></span>
-        <div class="icon-wrap w-16 h-16 rounded-2xl flex items-center justify-center bg-gradient-to-br from-indigo-500/20 to-fuchsia-500/10 border border-indigo-400/20">
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-indigo-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <div class="icon-wrap w-16 h-16 rounded-2xl flex items-center justify-center"
+             style="background:var(--gold-soft); border:1px solid rgba(168,121,79,0.35);">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8" style="color:var(--cinnamon);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.86L12 17.77l-6.18 3.23L7 14.14 2 9.27l6.91-1.01L12 2Z"/>
           </svg>
         </div>
         <div class="flex-1">
-          <h2 class="text-xl font-bold text-white">نقاط التجميع الشهري</h2>
-          <p class="mt-2 text-sm text-slate-400 leading-relaxed">
+          <h2 class="text-xl font-bold" style="color:var(--espresso);">نقاط التجميع الشهري</h2>
+          <p class="mt-2 text-sm leading-relaxed" style="color:var(--text-dim);">
             برنامج نقاط التجميع الشهري ومتابعة الرصيد والمكافآت.
           </p>
         </div>
-        <div class="flex items-center justify-between text-sm font-semibold text-indigo-300">
+        <div class="flex items-center justify-between text-sm font-semibold" style="color:var(--cinnamon);">
           <span>الدخول إلى الموقع</span>
           <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 rtl:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="m9 18 6-6-6-6"/>
@@ -234,12 +259,13 @@
 
 <!-- Footer -->
 <footer class="glass mt-auto">
-  <div class="max-w-6xl mx-auto px-5 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-slate-400">
+  <div class="max-w-6xl mx-auto px-5 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm" style="color:var(--text-dim);">
     <span>&copy; <span id="year"></span> جميع الحقوق محفوظة</span>
-    <a href="index.html" class="flex items-center gap-1.5 hover:text-white transition">
+    <a href="index.html" class="flex items-center gap-1.5 transition" style="color:var(--text-dim);" onmouseover="this.style.color='var(--espresso)'" onmouseout="this.style.color='var(--text-dim)'">
       <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 9.5 12 3l9 6.5"/>
-        <path d="M5 10v10h14V10"/>
+        <path d="M3 10.5 12 3l9 7.5"/>
+        <path d="M5 9.5V21h14V9.5"/>
+        <path d="M9.5 21v-6h5v6"/>
       </svg>
       العودة للصفحة الرئيسية
     </a>
@@ -249,16 +275,18 @@
 <!-- Install toast (fallback instructions for iOS / manual) -->
 <div id="install-toast" class="fixed bottom-5 inset-x-0 mx-auto w-[92%] max-w-sm glass rounded-2xl p-4 opacity-0 pointer-events-none translate-y-3 z-40 hidden">
   <div class="flex items-start gap-3">
-    <span class="mt-0.5 w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-400 flex items-center justify-center">
+    <span class="mt-0.5 w-9 h-9 shrink-0 rounded-xl flex items-center justify-center" style="background:linear-gradient(135deg, var(--cinnamon), var(--caramel));">
       <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>
+        <path d="M3 10.5 12 3l9 7.5"/>
+        <path d="M5 9.5V21h14V9.5"/>
+        <path d="M9.5 21v-6h5v6"/>
       </svg>
     </span>
     <div class="flex-1 text-sm">
-      <p class="font-semibold text-white">لتثبيت التطبيق على آيفون</p>
-      <p class="mt-1 text-slate-400 leading-relaxed">اضغط زر المشاركة في المتصفح ثم اختر "إضافة إلى الشاشة الرئيسية".</p>
+      <p class="font-semibold" style="color:var(--espresso);">لتثبيت التطبيق على آيفون</p>
+      <p class="mt-1 leading-relaxed" style="color:var(--text-dim);">اضغط زر المشاركة في المتصفح ثم اختر "إضافة إلى الشاشة الرئيسية".</p>
     </div>
-    <button onclick="document.getElementById('install-toast').classList.add('hidden')" class="text-slate-400 hover:text-white">✕</button>
+    <button onclick="document.getElementById('install-toast').classList.add('hidden')" style="color:var(--text-dim);">✕</button>
   </div>
 </div>
 
