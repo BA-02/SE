@@ -981,15 +981,15 @@
     const toPage = halfUnitToPage(seg.toUnit);
     return fromPage === toPage ? `سورة ${name} ${fromPage}` : `سورة ${name} ${fromPage}-${toPage}`;
   }
-  // هل هذا الجزء يغطي السورة (أو مجموعة السور المشتركة بصفحة واحدة) كاملة من أولها إلى آخرها؟
+  // هل هذا الجزء يغطي السورة (أو مجموعة السور المتجاورة التي تشارك صفحة بدايتها) كاملة من أولها
+  // إلى آخرها؟ ملاحظة مهمة: مجموعة السور المتشاركة بصفحة بداية واحدة (كالانفطار مع المطففين) قد
+  // تمتد فعلياً لأكثر من صفحة واحدة (سورتان قصيرتان، لكن مجموعهما صفحتان) — فالمقياس الصحيح دوماً
+  // هو بداية أول سورة في المجموعة ونهاية آخر سورة فيها (عبر surahEndPage)، وليس افتراض أن المجموعة
+  // بأكملها محصورة في صفحة واحدة مشتركة (وهو ما كان يُنتج نطاقاً خاطئاً يُقصي آخر صفحة من المجموعة
+  // ويمنعها من الظهور كسلسلة سور مكتملة، فتُعرض بأرقام صفحات بدل اسم السورة فقط).
   function isCompleteSurahSegment(seg) {
-    if (seg.tieLastIdx !== seg.surahIdx) {
-      // مجموعة سور تشارك صفحة واحدة: تُعتبر مكتملة فقط إن غطّى الجزء تلك الصفحة المشتركة كاملة
-      const page = halfUnitToPage(seg.fromUnit);
-      return seg.fromUnit === pageToHalfUnit(page, false) && seg.toUnit === pageToHalfUnit(page, true);
-    }
     const sStartUnit = pageToHalfUnit(surahStartPageOf(seg.surahIdx), false);
-    const sEndUnit = pageToHalfUnit(surahEndPage(seg.surahIdx), true);
+    const sEndUnit = pageToHalfUnit(surahEndPage(seg.tieLastIdx), true);
     return seg.fromUnit === sStartUnit && seg.toUnit === sEndUnit;
   }
   // تسمية نطاق مُدمَج كامل: يُقسَّم بحسب السور. أي سلسلة من سور متتالية مكتملة بالكامل ضمن هذا
