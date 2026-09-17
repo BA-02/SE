@@ -2453,18 +2453,23 @@
     const r = state.review;
     const planStart = getPlanStartDate();
 
-    let memoPerDay, memoFinish, memoTotalDays;
+    let memoPerDay, memoFinish;
     if (m.mode === "duration") {
       const rr = computeDuration(m);
       memoPerDay = rr.perDay;
       memoFinish = rr.finishDate;
-      memoTotalDays = Math.max(Math.round(rr.totalDays), 1);
     } else {
       const rr = computePace(m);
       memoPerDay = rr.perDay;
       memoFinish = rr.finishDate;
-      memoTotalDays = Math.max(Math.round(rr.totalDays), 1);
     }
+    // مصدر الحقيقة الوحيد لطول خطة الحفظ هو getMemoProgramDays (انظر تعليقها) — وهي نفس الدالة التي
+    // يستخدمها تبويب الحفظ المفرد وتصدير PDF (getCombinedPlanAssignments). إعادة حساب المدة هنا
+    // يدوياً من computeDuration/computePace مباشرة (كما كان الحال سابقاً) كانت تتجاهل تاريخ نهاية
+    // الخطة إن حدّده المستخدم (m.endMode === "date")، فيظهر جدول المعاينة على الشاشة بمدة مختلفة (غير
+    // مقصوصة) عن جدول PDF المُصدَّر لنفس الخطة بالضبط — وهو ما كان يجعل الجدولين يعرضان صفحات مختلفة
+    // لنفس الأيام.
+    const memoTotalDays = getMemoProgramDays(m);
     const memoDays = buildSegmentedDailyAssignments(getRemainingSegments(m), memoTotalDays, getEffectiveActiveDays(m), planStart, m.direction);
 
     const range = computeRange(r);
