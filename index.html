@@ -453,9 +453,18 @@ function showView(id){
 }
 
 async function boot(){
-  const { data: { session } } = await sb.auth.getSession();
-  if(!session){ showView('view-login'); return; }
-  await enterApp(session);
+  try{
+    // مهلة أمان: لو تعليقت مكتبة Supabase (نادراً ما يصير بسبب قفل داخلي بين
+    // التبويبات) لا نخلي المستخدم عالق على شاشة التحميل للأبد — بعد 6 ثوانٍ
+    // ننتقل تلقائياً لشاشة تسجيل الدخول.
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 6000));
+    const { data: { session } } = await Promise.race([sb.auth.getSession(), timeout]);
+    if(!session){ showView('view-login'); return; }
+    await enterApp(session);
+  }catch(err){
+    console.error('boot() failed or timed out:', err);
+    showView('view-login');
+  }
 }
 
 async function enterApp(session){
