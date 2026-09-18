@@ -873,7 +873,7 @@ function urlBase64ToUint8Array(base64String) {
 
 async function registerServiceWorker() {
   if (!pushIsSupported()) return null;
-  try { return await navigator.serviceWorker.register("/sw.js"); } catch { return null; }
+  try { return await navigator.serviceWorker.register("./sw.js"); } catch { return null; }
 }
 
 // حالة الاشتراك بهذا الجهاز/المتصفح تحديداً: "unsupported" | "not-subscribed" | "subscribed"
