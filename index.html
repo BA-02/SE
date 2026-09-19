@@ -119,7 +119,7 @@
 
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 
 <style>
   :root{
@@ -234,6 +234,28 @@
 
 <!-- شاشة تحميل أولية -->
 <div id="view-loading"><div class="spinner"></div></div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     🛟 شبكة أمان مستقلة: لو صار أي خطأ (مكتبة Supabase ما تحمّلت،
+     مشكلة إنترنت، خطأ برمجي...) قبل ما يوصل السكربت الرئيسي لسطر
+     boot()، هذا السكربت المنفصل يضمن إنه المستخدم ما يعلق على شاشة
+     التحميل للأبد — بعد 8 ثوانٍ يوريه شاشة الدخول مع رسالة خطأ.
+     ══════════════════════════════════════════════════════════════ -->
+<script>
+  setTimeout(function () {
+    var loading = document.getElementById('view-loading');
+    var login = document.getElementById('view-login');
+    if (loading && !loading.classList.contains('hidden')) {
+      loading.classList.add('hidden');
+      if (login) login.classList.remove('hidden');
+      var errBox = document.getElementById('login-error');
+      if (errBox) {
+        errBox.textContent = 'تعذّر تحميل النظام (تحقّق من الإنترنت أو من إعدادات Supabase) — أعد تحميل الصفحة إذا استمرت المشكلة.';
+        errBox.classList.remove('hidden');
+      }
+    }
+  }, 8000);
+</script>
 
 <!-- ══════════════ شاشة تسجيل الدخول ══════════════ -->
 <div id="view-login" class="hidden flex-1 flex items-center justify-center px-4">
@@ -409,9 +431,14 @@
    ══════════════════════════════════════════════════════════════ */
 const SUPABASE_URL = 'https://fyavaxwknvfqlqwkkvko.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_d4hjVJmSfdHU6ahko7Krfg_anODG69X';
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
-});
+let sb = null;
+try {
+  sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+  });
+} catch (e) {
+  console.error('فشل تهيئة Supabase (مكتبة supabase-js لم تُحمَّل؟):', e);
+}
 
 /* ══════════════════════════════════════════════════════════════
    1) أيقونات جاهزة (SVG) — يختار الأدمن منها عند إنشاء بطاقة
@@ -489,6 +516,13 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
   const btn = document.getElementById('login-submit');
   errBox.classList.add('hidden'); btn.disabled = true; btn.textContent = 'جارٍ الدخول...';
 
+  if (!sb) {
+    btn.disabled = false; btn.textContent = 'دخول';
+    errBox.textContent = 'تعذّر الاتصال بالخادم. تحقق من اتصالك بالإنترنت وأعد تحميل الصفحة.';
+    errBox.classList.remove('hidden');
+    return;
+  }
+
   const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
@@ -503,7 +537,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 });
 
 document.getElementById('logout-btn').addEventListener('click', async () => {
-  await sb.auth.signOut();
+  if (sb) { await sb.auth.signOut(); }
   currentSession = null; currentProfile = null;
   document.getElementById('admin-toggle-btn').classList.add('hidden');
   document.getElementById('login-email').value=''; document.getElementById('login-password').value='';
